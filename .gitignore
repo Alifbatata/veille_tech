@@ -1,0 +1,68 @@
+# =============================================================================
+# Secrets et configuration locale — JAMAIS commiter
+# =============================================================================
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+
+# =============================================================================
+# Environnement Python
+# =============================================================================
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# =============================================================================
+# Données générées par le pipeline (regénérables à chaque run)
+# =============================================================================
+# On garde data/targets.json comme input utilisateur, on exclut les sorties
+data/scraper_output.json
+data/scraper_checkpoint.json
+data/ai_filter_output.json
+data/previous_ai_output.json
+data/articles_archive.json
+data/seen_urls.json
+data/recap_preview.html
+data/test_preview.html
+data/_backup_*/
+
+# =============================================================================
+# Logs
+# =============================================================================
+logs/
+*.log
+
+# =============================================================================
+# Outils IDE / éditeurs
+# =============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# =============================================================================
+# Sessions / cache de l'agent (Claude Code, etc.)
+# =============================================================================
+.claude/
+.cursor/
+.continue/
+
+# =============================================================================
+# Tests / outputs ponctuels
+# =============================================================================
+_test_*.py
+diagnose.py
+bootstrap.py
+*.tmp

@@ -1,0 +1,261 @@
+# =============================================================================
+# .github/workflows/main.yml
+# Veille Technologique — Digest hebdomadaire automatisé
+# =============================================================================
+# Déclenchement : tous les lundis à 08:00 UTC
+# Pipeline      : scraper → ai_filter → mailer
+#
+# Secrets GitHub requis (Settings → Secrets → Actions → New repository secret) :
+#   GEMINI_API_KEY    — clé API Google AI Studio
+#   GMAIL_USER        — adresse Gmail expéditrice
+#   GMAIL_PASSWORD    — mot de passe d'application Gmail (16 caractères)
+#   MAIL_RECIPIENT    — adresse destinataire du digest
+#
+# Secrets optionnels :
+#   GEMINI_MODEL      — ex: gemini-2.5-flash (défaut)
+#   AI_BATCH_SIZE     — nb articles par batch IA (défaut: 20)
+#   MAIL_MIN_SCORE    — score minimum dans le digest (défaut: 2)
+#   SCRAPER_USER_AGENT
+# =============================================================================
+
+name: "⚗️ Veille Tech — Digest Hebdomadaire"
+
+on:
+  # ── Déclenchement planifié ─────────────────────────────────────────────────
+  schedule:
+    - cron: "0 8 * * 1"   # Chaque lundi à 08:00 UTC
+
+  # ── Déclenchement manuel (pour tests depuis l'onglet Actions) ──────────────
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Mode dry_run — génère le digest sans envoyer l'email"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      min_score:
+        description: "Score minimum des articles à inclure (1–5)"
+        required: false
+        default: "2"
+        type: choice
+        options: ["1", "2", "3", "4", "5"]
+
+# Pas de permissions superflues — principe du moindre privilège
+permissions:
+  contents: read
+
+jobs:
+  veille-tech:
+    name: "Collecte → Filtre IA → Envoi digest"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # ── Variables d'environnement du job ──────────────────────────────────────
+    # Les secrets ne sont jamais exposés dans les logs (masquage automatique GH)
+    env:
+      # Secrets obligatoires
+      GEMINI_API_KEY:   ${{ secrets.GEMINI_API_KEY }}
+      GMAIL_USER:       ${{ secrets.GMAIL_USER }}
+      GMAIL_PASSWORD:   ${{ secrets.GMAIL_PASSWORD }}
+      MAIL_RECIPIENT:   ${{ secrets.MAIL_RECIPIENT }}
+
+      # Secrets optionnels (valeur vide → défaut du code Python)
+      GEMINI_MODEL:      ${{ secrets.GEMINI_MODEL }}
+      AI_BATCH_SIZE:     ${{ secrets.AI_BATCH_SIZE }}
+      SCRAPER_USER_AGENT: ${{ secrets.SCRAPER_USER_AGENT }}
+
+      # Paramètres issus du déclenchement manuel (ou valeurs par défaut)
+      MAIL_DRY_RUN:   ${{ github.event.inputs.dry_run   || 'false' }}
+      MAIL_MIN_SCORE: ${{ github.event.inputs.min_score || secrets.MAIL_MIN_SCORE || '2' }}
+
+      # Chemins
+      DATA_DIR: data
+
+    steps:
+
+      # ── 1. Checkout du dépôt ────────────────────────────────────────────────
+      - name: "📥 Checkout"
+        uses: actions/checkout@v4
+
+      # ── 2. Setup Python ─────────────────────────────────────────────────────
+      - name: "🐍 Setup Python 3.12"
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"                 # cache du venv entre les runs
+
+      # ── 3. Installation des dépendances ─────────────────────────────────────
+      - name: "📦 Installation des dépendances"
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ── 4. Vérification des secrets critiques ───────────────────────────────
+      # On vérifie avant d'exécuter pour un message d'erreur clair
+      - name: "🔑 Vérification des secrets"
+        run: |
+          missing=()
+          [ -z "$GEMINI_API_KEY"  ] && missing+=("GEMINI_API_KEY")
+          [ -z "$GMAIL_USER"      ] && missing+=("GMAIL_USER")
+          [ -z "$GMAIL_PASSWORD"  ] && missing+=("GMAIL_PASSWORD")
+          [ -z "$MAIL_RECIPIENT"  ] && missing+=("MAIL_RECIPIENT")
+
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "❌ Secrets manquants : ${missing[*]}"
+            echo "   → Settings → Secrets → Actions → New repository secret"
+            exit 1
+          fi
+          echo "✅ Tous les secrets critiques sont présents."
+
+      # ── 5. Création des dossiers de données ─────────────────────────────────
+      - name: "📁 Préparation des dossiers"
+        run: |
+          mkdir -p data
+          echo "✅ Dossier data/ prêt."
+
+      # ── 6. SCRAPER — collecte RSS + Google News ──────────────────────────────
+      - name: "📡 Scraping — flux RSS & Google News"
+        id: scraper
+        run: |
+          python - <<'PYEOF'
+          import sys, json, os
+          sys.path.insert(0, 'src')
+          from scraper import run_scraper
+
+          result = run_scraper(include_rss=True, include_gnews=True, apply_filter=True)
+
+          out_path = os.path.join('data', 'scraper_output.json')
+          with open(out_path, 'w', encoding='utf-8') as f:
+              json.dump(result, f, ensure_ascii=False, indent=2)
+
+          total = result['meta']['total_articles']
+          raw   = result['meta']['total_raw']
+          print(f"✅ Scraping terminé — {total} articles pertinents / {raw} bruts")
+          print(f"::notice title=Scraper::✅ {total} articles collectés ({raw} bruts analysés)")
+          PYEOF
+
+      # ── 7. Vérification : au moins 1 article collecté ───────────────────────
+      - name: "🔎 Contrôle : articles disponibles"
+        run: |
+          python - <<'PYEOF'
+          import json, sys
+          with open('data/scraper_output.json') as f:
+              data = json.load(f)
+          count = data['meta']['total_articles']
+          if count == 0:
+              print("⚠️  Aucun article collecté. Le digest ne sera pas envoyé.")
+              # On ne fait pas échouer le workflow — c'est une semaine sans résultat
+              sys.exit(0)
+          print(f"✅ {count} article(s) prêts pour le filtre IA.")
+          PYEOF
+
+      # ── 8. AI FILTER — analyse et notation par Gemini ───────────────────────
+      - name: "🤖 Filtre IA — Gemini Flash"
+        id: ai_filter
+        run: |
+          python - <<'PYEOF'
+          import sys, json, os
+          sys.path.insert(0, 'src')
+          from ai_filter import filter_articles_with_ai
+
+          with open('data/scraper_output.json', encoding='utf-8') as f:
+              scraper_data = json.load(f)
+
+          articles   = scraper_data.get('articles', [])
+          min_score  = int(os.environ.get('MAIL_MIN_SCORE', '2'))
+
+          if not articles:
+              print("⚠️  Aucun article à filtrer.")
+              result = {'meta': {'retained_count': 0, 'input_count': 0, 'model': 'n/a'}, 'articles': []}
+          else:
+              result = filter_articles_with_ai(articles, min_score=min_score)
+
+          out_path = 'data/ai_filter_output.json'
+          with open(out_path, 'w', encoding='utf-8') as f:
+              json.dump(result, f, ensure_ascii=False, indent=2)
+
+          retained = result['meta']['retained_count']
+          total    = result['meta']['input_count']
+          model    = result['meta'].get('model', 'gemini')
+          print(f"✅ Filtre IA terminé — {retained}/{total} articles retenus ({model})")
+          print(f"::notice title=AI Filter::🤖 {retained} articles retenus sur {total}")
+          PYEOF
+
+      # ── 9. MAILER — génération et envoi du digest ────────────────────────────
+      - name: "📧 Envoi du digest par email"
+        id: mailer
+        run: |
+          python - <<'PYEOF'
+          import sys, json, os
+          sys.path.insert(0, 'src')
+          from mailer import send_digest, build_html_email
+
+          with open('data/ai_filter_output.json', encoding='utf-8') as f:
+              ai_data = json.load(f)
+
+          dry_run = os.environ.get('MAIL_DRY_RUN', 'false').lower() == 'true'
+
+          if dry_run:
+              print("🧪 Mode DRY RUN — génération HTML sans envoi.")
+
+          retained = ai_data['meta'].get('retained_count', 0)
+          if retained == 0 and not dry_run:
+              print("⚠️  Aucun article retenu — email non envoyé (digest vide).")
+          else:
+              status = send_digest(ai_data, dry_run=dry_run)
+              if status['success']:
+                  mode = 'simulé' if dry_run else 'envoyé'
+                  print(f"✅ Digest {mode} → {status['recipient']} ({status['html_bytes']:,} octets)")
+                  print(f"::notice title=Mailer::📧 Digest {mode} — {retained} article(s)")
+              else:
+                  print(f"❌ Échec envoi : {status.get('error')}")
+                  sys.exit(1)
+          PYEOF
+
+      # ── 10. Upload des artefacts (consultables depuis l'onglet Actions) ──────
+      - name: "💾 Upload des artefacts de debug"
+        if: always()    # même en cas d'échec partiel
+        uses: actions/upload-artifact@v4
+        with:
+          name: "veille-tech-run-${{ github.run_number }}"
+          path: |
+            data/scraper_output.json
+            data/ai_filter_output.json
+          retention-days: 14    # conservation 2 semaines
+
+      # ── 11. Résumé du run (affiché dans l'onglet Actions) ───────────────────
+      - name: "📊 Résumé du run"
+        if: always()
+        run: |
+          python - <<'PYEOF'
+          import json, os
+
+          summary_lines = ["## ⚗️ Veille Tech — Résumé du run\n"]
+
+          try:
+              with open('data/scraper_output.json') as f:
+                  s = json.load(f)['meta']
+              summary_lines.append(f"| Étape | Résultat |")
+              summary_lines.append(f"|-------|---------|")
+              summary_lines.append(f"| 📡 Scraper | **{s['total_articles']}** articles pertinents / {s['total_raw']} bruts |")
+          except Exception as e:
+              summary_lines.append(f"- 📡 Scraper : erreur ({e})")
+
+          try:
+              with open('data/ai_filter_output.json') as f:
+                  a = json.load(f)['meta']
+              summary_lines.append(f"| 🤖 Filtre IA | **{a['retained_count']}** retenus / {a['input_count']} — modèle : `{a.get('model','?')}` |")
+              summary_lines.append(f"| 📧 Mailer | Score min : {os.environ.get('MAIL_MIN_SCORE','2')} · Dry-run : {os.environ.get('MAIL_DRY_RUN','false')} |")
+          except Exception as e:
+              summary_lines.append(f"- 🤖 Filtre IA : erreur ({e})")
+
+          summary = "\n".join(summary_lines)
+          print(summary)
+
+          # Écriture dans le GITHUB_STEP_SUMMARY (affiché dans l'UI Actions)
+          summary_path = os.environ.get('GITHUB_STEP_SUMMARY', '')
+          if summary_path:
+              with open(summary_path, 'a') as f:
+                  f.write(summary + "\n")
+          PYEOF

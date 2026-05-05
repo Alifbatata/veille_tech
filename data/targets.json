@@ -1,0 +1,42 @@
+{
+  "companies": [
+    "Positive Coating",
+    "Oerlikon",
+    "Ionbond",
+    "Evatec",
+    "Platit",
+    "Swiss-PVD",
+    "Swiss Cluster",
+    "Flisom",
+    "Neyco",
+    "Surcotec",
+    "CEA-Leti",
+    "CNRS",
+    "ONERA",
+    "Fraunhofer",
+    "Dockweiler Chemicals",
+    "Von Ardenne",
+    "SINGULUS Technologies",
+    "Beneq",
+    "Oxford Instruments",
+    "ASM International",
+    "Forge Nano"
+  ],
+
+  "keywords": [
+    "PVD",
+    "Physical Vapor Deposition",
+    "CVD",
+    "Chemical Layer Deposition",
+    "ALD",
+    "Atomic Layer Deposition",
+    "thin film",
+    "coating",
+    "surface treatment",
+    "DLC",
+    "hard coating",
+    "magnetron sputtering",
+    "hipims",
+    "High Power Impulse Magnetron Sputtering"
+  ]
+}
