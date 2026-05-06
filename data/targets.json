@@ -20,8 +20,7 @@
     "Beneq",
     "Oxford Instruments",
     "ASM International",
-    "Forge Nano",
-    "mama"
+    "Forge Nano"
   ],
   "keywords": [
     "PVD",
@@ -37,6 +36,7 @@
     "hard coating",
     "magnetron sputtering",
     "hipims",
-    "High Power Impulse Magnetron Sputtering"
+    "High Power Impulse Magnetron Sputtering",
+    "plasma deposition"
   ]
 }
