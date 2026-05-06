@@ -98,11 +98,13 @@ Document destiné aux développeurs qui maintiennent ou étendent le programme.
 1. `_build_user_prompt` formate les articles avec ID, source, titre, résumé tronqué à 400 chars
 2. `_call_gemini_with_retry(json_mode=True)` appelle Gemini avec :
    - `response_mime_type="application/json"` (garantit JSON pur, pas de fences markdown)
-   - `max_output_tokens=8192`
+   - `max_output_tokens=_MAX_OUTPUT_TOKENS` (32768 — marge pour batchs ≤ 50 articles)
    - `temperature=0.1` (déterministe)
    - Retry exponentiel sur `ResourceExhausted` / `ServiceUnavailable`
-3. `_parse_json_response` parse en JSON direct + filet de sécurité regex
-4. `_force_company_scores` garantit score ≥ 4 si un concurrent est mentionné dans le titre/résumé (vérification Python indépendante de l'IA)
+   - Retourne un `_GeminiCallResult(text, truncated)` (NamedTuple)
+3. **Auto-split sur troncature** : si `truncated=True` (finish_reason == MAX_TOKENS) ou JSON malformé, `_process_batch` splitte le batch en 2 moitiés et relance récursivement (cap `_MAX_BATCH_SPLIT_DEPTH=2` → worst case 1+2+4=7 appels). Permet de garder `AI_BATCH_SIZE` permissif sans perdre de batch.
+4. `_parse_json_response` parse en JSON direct + filet de sécurité regex
+5. `_force_company_scores` garantit score ≥ 4 si un concurrent est mentionné dans le titre/résumé (vérification Python indépendante de l'IA)
 
 **Synthèse finale** :
 - Tri décroissant par score

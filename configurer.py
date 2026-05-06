@@ -235,21 +235,23 @@ FIELDS: list[Field] = [
             "Nombre d'articles que l'IA analyse en un seul appel.\n"
             "Influence le nombre total de requetes API consommees par run.\n"
             "Exemple : 200 articles + batch=20 -> 10 requetes ; batch=10 -> 20 requetes.\n\n"
-            "  - PETIT (5-10)  : plus de requetes, mais reponses tres fiables\n"
-            "                    (utile si tu vois 'JSON tronque' dans les logs)\n"
-            "  - MOYEN (15-25) : equilibre - recommande pour la plupart des cas\n"
-            "  - GRAND (30-50) : moins de requetes, economise le quota gratuit\n"
-            "                    (mais risque de tronquer la reponse JSON)\n\n"
-            "Le defaut [20] est calibre pour Gemini 2.5 Flash (8192 tokens output)\n"
-            "et fonctionne avec tous les modeles de la cascade dynamique."
+            "  - PETIT (5-10)  : plus de requetes, reponses tres fiables\n"
+            "  - MOYEN (15-25) : equilibre - recommande\n"
+            "  - GRAND (30-50) : moins de requetes, economise le quota gratuit\n\n"
+            "Bonne nouvelle : le pipeline gere automatiquement les troncatures.\n"
+            "Si un batch est trop gros pour le modele (cas pathologique avec\n"
+            "des articles a longues descriptions), il est detecte (finish_reason\n"
+            "== MAX_TOKENS) et splitte en 2 automatiquement. Tu peux donc laisser\n"
+            "20 par defaut sans risquer de perdre des articles."
         ),
         default="20",
         instructions=(
-            "99 % du temps tu peux laisser le defaut (20).\n"
+            "Tu peux laisser le defaut (20) dans 99 % des cas.\n"
             "Ne change que si :\n"
-            "  - Tu vois souvent 'JSON tronque' dans les logs   -> baisse a 10\n"
-            "  - Ton quota Gemini gratuit est tres tendu        -> monte a 30-40\n"
-            "  - Tu veux tester un modele a petit contexte      -> baisse a 5-10"
+            "  - Ton quota Gemini gratuit est tres tendu  -> monte a 30-40\n"
+            "  - Tu vois beaucoup de 'split-retry' dans les logs -> baisse a 10-15\n"
+            "    (signifie que ton modele tronque souvent ; baisser evite\n"
+            "     les appels supplementaires)"
         ),
         required=False,
         validator=_validate_int_range(5, 50),

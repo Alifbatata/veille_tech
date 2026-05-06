@@ -19,7 +19,7 @@ import re
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, NamedTuple
 
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
@@ -41,6 +41,18 @@ _API_KEY: str | None = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL: str = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_TIMEOUT: int = int(os.environ.get("GEMINI_TIMEOUT", "60"))
 AI_BATCH_SIZE: int = int(os.environ.get("AI_BATCH_SIZE", "20"))
+
+# Tokens max par appel Gemini. 32768 = 4× le minimum historique de 8192.
+# Gemini 2.5 Flash supporte 65536 ; on prend 32768 pour avoir une marge sans
+# être inutilement gourmand. Couvre confortablement un batch de 50 articles.
+# Si une troncature survient malgré tout, _process_batch détecte finish_reason
+# == MAX_TOKENS et split le batch en deux automatiquement (cf. _MAX_BATCH_SPLIT_DEPTH).
+_MAX_OUTPUT_TOKENS: int = 32768
+
+# Profondeur max de la récursion auto-split sur troncature.
+# 0 = pas de split. 2 = N → N/2 → N/4. Au-delà on accepte le résultat partiel.
+# Coût worst case : 1 + 2 + 4 = 7 appels API pour le batch initial (rare).
+_MAX_BATCH_SPLIT_DEPTH: int = 2
 
 # Chaîne de fallback de SECOURS (statique). Utilisée si la découverte dynamique
 # via list_models() échoue (réseau coupé au boot, clé API restreinte, etc.).
@@ -229,7 +241,7 @@ def _build_model(model_name: str) -> genai.GenerativeModel:
     generation_config = genai.GenerationConfig(
         temperature=0.1,
         top_p=0.95,
-        max_output_tokens=8192,
+        max_output_tokens=_MAX_OUTPUT_TOKENS,
     )
     safety_settings = [
         {"category": "HARM_CATEGORY_HARASSMENT",        "threshold": "BLOCK_NONE"},
@@ -536,6 +548,38 @@ def _parse_json_response(raw: str) -> dict[str, Any]:
 # Appel API avec retry
 # ---------------------------------------------------------------------------
 
+class _GeminiCallResult(NamedTuple):
+    """Résultat d'un appel Gemini : texte + flag de troncature.
+
+    `truncated` est True si l'API a indiqué finish_reason == MAX_TOKENS,
+    c'est-à-dire que la génération s'est arrêtée parce qu'on a atteint
+    `max_output_tokens`. Dans ce cas le JSON peut être malformé (coupé en
+    plein milieu) et le caller (typiquement `_process_batch`) doit splitter
+    le batch en deux et réessayer chaque moitié.
+    """
+    text: str
+    truncated: bool
+
+
+def _is_response_truncated(response: Any) -> bool:
+    """Détecte si une réponse Gemini a été tronquée pour cause de tokens max.
+
+    Robuste face à plusieurs représentations possibles de finish_reason
+    selon la version du SDK : enum (.name == "MAX_TOKENS"), int (== 2),
+    ou string brute.
+    """
+    try:
+        finish_reason = response.candidates[0].finish_reason
+    except (IndexError, AttributeError, TypeError):
+        return False
+    name = getattr(finish_reason, "name", None)
+    if name and "MAX_TOKENS" in str(name).upper():
+        return True
+    if "MAX_TOKENS" in str(finish_reason).upper():
+        return True
+    return finish_reason == 2
+
+
 def _call_gemini_with_retry(
     model: genai.GenerativeModel,
     prompt: str,
@@ -543,7 +587,7 @@ def _call_gemini_with_retry(
     backoff: float = 2.0,
     json_mode: bool = False,
     prefix_system_prompt: bool = True,
-) -> str:
+) -> _GeminiCallResult:
     """
     Appelle l'API Gemini avec gestion des erreurs, retry et bascule en cascade.
 
@@ -567,7 +611,10 @@ def _call_gemini_with_retry(
                    sinon Gemma génère un texte ET un dump JSON pollué.
 
     Returns:
-        Texte brut de la réponse du modèle.
+        `_GeminiCallResult(text, truncated)` :
+        - `text` : texte brut de la réponse du modèle
+        - `truncated` : True si la réponse a été coupée pour cause de
+          max_output_tokens atteint (le JSON peut alors être malformé).
 
     Raises:
         GeminiUnavailableError si toute la chaîne est épuisée.
@@ -582,7 +629,7 @@ def _call_gemini_with_retry(
             return genai.GenerationConfig(
                 temperature=0.1,
                 top_p=0.95,
-                max_output_tokens=8192,
+                max_output_tokens=_MAX_OUTPUT_TOKENS,
                 response_mime_type="application/json",
             )
         return None
@@ -609,7 +656,10 @@ def _call_gemini_with_retry(
                     f"Réponse vide ou bloquée par les filtres de sécurité. "
                     f"Finish reason: {response.prompt_feedback}"
                 )
-            return response.text
+            return _GeminiCallResult(
+                text=response.text,
+                truncated=_is_response_truncated(response),
+            )
 
         except google_exceptions.ResourceExhausted as exc:
             retry_after = _extract_retry_seconds(exc)
@@ -678,28 +728,67 @@ def _process_batch(
     model: genai.GenerativeModel,
     batch: list[dict[str, Any]],
     offset: int,
+    depth: int = 0,
 ) -> dict[str, Any]:
     """
     Envoie un batch d'articles à Gemini et retourne le JSON parsé.
-    En cas d'échec de parsing, retourne un résultat vide documenté.
-    La clé "tldr" est toujours présente dans le dict retourné.
+
+    En cas de troncature détectée (finish_reason == MAX_TOKENS) ou de JSON
+    malformé qui ressemble à une troncature, le batch est splitté en deux
+    et chaque moitié relancée récursivement (jusqu'à `_MAX_BATCH_SPLIT_DEPTH`).
+    Cela permet à `AI_BATCH_SIZE` d'être un knob souple : l'utilisateur peut
+    laisser 20 par défaut sans risquer de perdre un batch sur un article
+    pathologique (description très longue, etc.).
+
+    Args:
+        depth: profondeur récursive courante. À 0 lors du premier appel.
+               Le caller passe depth+1 quand il splitte.
+
+    Returns:
+        Dict avec clés `retained`, `tldr`, `rejected_count`, et au besoin
+        `model_notes`. La clé "tldr" est toujours présente.
     """
     prompt = _build_user_prompt(batch, offset=offset)
+    can_split = depth < _MAX_BATCH_SPLIT_DEPTH and len(batch) > 1
 
     try:
-        # json_mode=True garantit un JSON pur (pas de ```json ... ``` markdown)
-        raw_response = _call_gemini_with_retry(model, prompt, json_mode=True)
-        result       = _parse_json_response(raw_response)
+        gemini_result = _call_gemini_with_retry(model, prompt, json_mode=True)
+
+        # Cas troncature détectée par finish_reason : split direct sans tenter
+        # de parser le JSON probablement coupé (gain de temps).
+        if gemini_result.truncated and can_split:
+            logger.warning(
+                "✂️  Batch offset=%d tronqué par MAX_TOKENS (%d articles, depth=%d) "
+                "— split en 2 et retry",
+                offset, len(batch), depth,
+            )
+            return _split_and_retry_batch(model, batch, offset, depth)
+
+        result = _parse_json_response(gemini_result.text)
+        partial_note = " ⚠️ partiel (tokens max)" if gemini_result.truncated else ""
         logger.info(
-            "   └─ Batch offset=%d : %d retenu(s) / %d total",
-            offset,
+            "   └─ Batch offset=%d (depth=%d) : %d retenu(s) / %d total%s",
+            offset, depth,
             len(result.get("retained", [])),
             len(batch),
+            partial_note,
         )
         return result
 
     except (ValueError, json.JSONDecodeError) as exc:
-        logger.error("⚠️  JSON malformé pour le batch offset=%d : %s", offset, exc)
+        # JSON malformé : possiblement aussi dû à une troncature (le SDK peut
+        # ne pas remonter MAX_TOKENS dans tous les cas). Tenter le split-retry.
+        if can_split:
+            logger.warning(
+                "📉 JSON malformé batch offset=%d (depth=%d, %d articles) "
+                "— split-retry pour récupérer ce qu'on peut : %s",
+                offset, depth, len(batch), exc,
+            )
+            return _split_and_retry_batch(model, batch, offset, depth)
+        logger.error(
+            "⚠️  JSON malformé pour le batch offset=%d (depth=%d, abandon) : %s",
+            offset, depth, exc,
+        )
         return {
             "retained": [],
             "tldr": "",
@@ -715,6 +804,32 @@ def _process_batch(
             "rejected_count": len(batch),
             "model_notes": f"API indisponible : {exc}",
         }
+
+
+def _split_and_retry_batch(
+    model: genai.GenerativeModel,
+    batch: list[dict[str, Any]],
+    offset: int,
+    current_depth: int,
+) -> dict[str, Any]:
+    """Split un batch en deux moitiés et relance _process_batch sur chaque,
+    avec depth incrémenté. Agrège les `retained` et somme les `rejected_count`.
+
+    Les offsets sont calculés pour que les `id` des articles dans la réponse
+    Gemini restent cohérents avec l'index global de la liste articles.
+    """
+    mid = len(batch) // 2
+    next_depth = current_depth + 1
+    left  = _process_batch(model, batch[:mid],  offset,         depth=next_depth)
+    right = _process_batch(model, batch[mid:],  offset + mid,   depth=next_depth)
+    return {
+        "retained": list(left.get("retained", [])) + list(right.get("retained", [])),
+        "tldr": "",
+        "rejected_count": (
+            int(left.get("rejected_count", 0)) + int(right.get("rejected_count", 0))
+        ),
+        "model_notes": f"split-retry agrégé (depth={next_depth})",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -851,7 +966,7 @@ def _generate_executive_summary(
     # principale du scoring si on revenait scorer un nouveau batch).
     saved_active_name = _active_model_name
     saved_active_model = _active_model
-    raw: str | None = None
+    raw_text: str | None = None
     last_error: str = ""
     try:
         for premium in _PREMIUM_SUMMARY_MODELS:
@@ -868,10 +983,13 @@ def _generate_executive_summary(
 
             try:
                 logger.info("📝 Résumé exécutif : tentative avec %s (premium)…", premium)
-                raw = _call_gemini_with_retry(
+                call_result = _call_gemini_with_retry(
                     premium_model, summary_prompt, max_retries=1,
                     prefix_system_prompt=False,
                 )
+                raw_text = call_result.text
+                if call_result.truncated:
+                    logger.info("   └─ Résumé exécutif tronqué par tokens max — utilisé tel quel")
                 logger.info("✅ Résumé exécutif généré par %s", premium)
                 break
             except GeminiUnavailableError as exc:
@@ -884,19 +1002,20 @@ def _generate_executive_summary(
         globals()["_active_model"] = saved_active_model
         globals()["_active_model_name"] = saved_active_name
 
-    if raw is None:
+    if raw_text is None:
         # Aucun premium n'a marché — fallback ultime : modèle actif standard
         try:
             logger.info("📝 Résumé exécutif : fallback sur modèle standard %s", saved_active_name)
-            raw = _call_gemini_with_retry(
+            call_result = _call_gemini_with_retry(
                 model, summary_prompt, max_retries=2, prefix_system_prompt=False,
             )
+            raw_text = call_result.text
         except GeminiUnavailableError as exc:
             logger.warning("⚠️  Impossible de générer le résumé exécutif (premium et fallback): %s — %s",
                            last_error, exc)
             return ""
 
-    summary = _sanitize_executive_summary(raw)
+    summary = _sanitize_executive_summary(raw_text)
     logger.info("✅ Résumé exécutif généré (%d caractères)", len(summary))
     return summary
 

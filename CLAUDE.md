@@ -53,7 +53,9 @@
   - L'orchestrateur ne doit jamais crasher : `main.py` a un try/except global qui envoie un email d'alerte
 - **Gemini** :
   - Toujours `response_mime_type="application/json"` quand on attend du JSON (sinon Gemini wrappe en ` ```json ... ``` `)
-  - `max_output_tokens=8192` minimum pour les batches >= 20 articles (4096 tronque le JSON)
+  - `_MAX_OUTPUT_TOKENS = 32768` (constante module dans `ai_filter.py`). Marge confortable pour batchs ≤ 50 articles.
+  - **Auto-split sur troncature** : si `finish_reason == MAX_TOKENS` ou JSON malformé, `_process_batch` splitte le batch en 2 et relance récursivement (cap `_MAX_BATCH_SPLIT_DEPTH=2`, worst case 7 appels API). L'utilisateur peut donc laisser `AI_BATCH_SIZE=20` sans risquer de perdre un batch sur article pathologique.
+  - `_call_gemini_with_retry` retourne un `_GeminiCallResult(text, truncated)` (NamedTuple) — les callers résumé exécutif accèdent à `.text`, batch utilise aussi `.truncated`.
   - Toujours parser avec `json.loads` + filet de sécurité regex en fallback
   - Le prompt système est construit dynamiquement avec `TARGET_COMPANIES` (ne pas hardcoder)
 - **Style** : PEP 8, snake_case fonctions/variables, PascalCase classes
