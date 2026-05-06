@@ -255,7 +255,19 @@ def _print_banner() -> None:
     console.print()
 
 
-def _print_field_card(field: Field, current_value: str | None) -> None:
+def _mask_value(field: Field, value: str) -> str:
+    if not value:
+        return "(vide)"
+    if field.secret and len(value) > 4:
+        return "•" * 8 + value[-4:]
+    return value
+
+
+def _print_field_card(
+    field: Field,
+    existing_value: str | None,
+    staged_value: str | None,
+) -> None:
     body = Text()
     body.append(field.description.strip() + "\n\n", style="white")
     if field.url:
@@ -265,12 +277,23 @@ def _print_field_card(field: Field, current_value: str | None) -> None:
         body.append("📋 COMMENT FAIRE :\n", style="bold yellow")
         body.append(field.instructions.strip() + "\n", style="dim white")
 
-    if current_value:
-        body.append("\n✅ Valeur actuelle : ", style="bold green")
-        masked = ("•" * 8 + current_value[-4:]) if field.secret and len(current_value) > 4 else current_value
-        body.append(masked, style="green")
+    has_staged = staged_value is not None
+    if has_staged and staged_value != (existing_value or ""):
+        body.append("\n🟢 NOUVELLE valeur (sera enregistree) : ", style="bold bright_green")
+        body.append(_mask_value(field, staged_value), style="bright_green")
+        body.append("\n📂 Ancienne valeur dans .env       : ", style="yellow")
+        body.append(
+            _mask_value(field, existing_value) if existing_value else "(aucune)",
+            style="dim yellow",
+        )
+    elif has_staged:
+        body.append("\n✅ Valeur enregistree (inchangee depuis .env) : ", style="bold green")
+        body.append(_mask_value(field, staged_value), style="green")
+    elif existing_value:
+        body.append("\n✅ Valeur actuelle dans .env : ", style="bold green")
+        body.append(_mask_value(field, existing_value), style="green")
     elif field.default:
-        body.append(f"\n💡 Defaut propose : ", style="bold yellow")
+        body.append("\n💡 Defaut propose : ", style="bold yellow")
         body.append(field.default, style="yellow")
 
     title = field.label + ("  (optionnel)" if not field.required else "")
@@ -280,19 +303,43 @@ def _print_field_card(field: Field, current_value: str | None) -> None:
 _GO_BACK = "__GO_BACK__"  # sentinelle pour indiquer "retour au champ precedent"
 
 
-def _ask_field(field: Field, current_value: str | None, can_go_back: bool) -> str:
-    """Pose la question pour un champ. Retourne la valeur OU _GO_BACK si l'utilisateur
-    veut revenir au champ precedent."""
-    while True:
-        _print_field_card(field, current_value)
+def _ask_field(
+    field: Field,
+    existing_value: str | None,
+    staged_value: str | None,
+    can_go_back: bool,
+) -> str:
+    """Pose la question pour un champ.
 
-        if current_value:
-            actions = ["g", "m", "v"] + (["p"] if can_go_back else [])
-            actions_label = (
-                "  [bold]g[/bold]arder • [bold]m[/bold]odifier • [bold]v[/bold]oir en clair"
-                + (" • [bold]p[/bold]recedent" if can_go_back else "")
-            )
-            console.print(actions_label)
+    Retourne la valeur saisie (chaine, eventuellement vide) OU la sentinelle
+    `_GO_BACK` si l'utilisateur veut revenir au champ precedent.
+
+    `existing_value` = valeur actuellement dans .env (avant cette session).
+    `staged_value`   = valeur deja saisie pendant cette session (None si jamais visite).
+    """
+    has_staged = staged_value is not None
+    effective_value = staged_value if has_staged else (existing_value or "")
+    has_value = has_staged or bool(existing_value)
+
+    while True:
+        _print_field_card(field, existing_value, staged_value)
+
+        if has_value:
+            actions = ["g", "m", "v"]
+            label_parts = [
+                "[bold]g[/bold]arder",
+                "[bold]m[/bold]odifier",
+                "[bold]v[/bold]oir en clair",
+            ]
+            staged_differs = has_staged and staged_value != (existing_value or "")
+            if staged_differs and existing_value:
+                actions.append("r")
+                label_parts.append("[bold]r[/bold]estaurer la valeur .env")
+            if can_go_back:
+                actions.append("p")
+                label_parts.append("[bold]p[/bold]recedent")
+
+            console.print("  " + " • ".join(label_parts))
             choice = Prompt.ask(
                 "  [bold]Que veux-tu faire ?[/bold]",
                 choices=actions,
@@ -300,11 +347,19 @@ def _ask_field(field: Field, current_value: str | None, can_go_back: bool) -> st
                 show_choices=False,
             )
             console.print()
+
             if choice == "g":
-                return current_value
+                return effective_value
             if choice == "v":
-                console.print(f"  Valeur en clair : [bold]{current_value}[/bold]\n")
+                console.print(f"  Valeur en clair : [bold]{effective_value}[/bold]\n")
                 continue
+            if choice == "r":
+                restored = existing_value or ""
+                console.print(
+                    f"  [yellow]↺ Restauration de la valeur .env : "
+                    f"[bold]{_mask_value(field, restored)}[/bold][/yellow]\n"
+                )
+                return restored
             if choice == "p":
                 return _GO_BACK
         else:
@@ -325,14 +380,17 @@ def _ask_field(field: Field, current_value: str | None, can_go_back: bool) -> st
         prompt_text = "  [bold]Saisis la valeur[/bold]"
         if not field.required:
             prompt_text += " [dim](laisse vide et appuie Entree pour passer)[/dim]"
-        if field.default and not current_value:
+        if field.default and not has_value:
             value = Prompt.ask(prompt_text, default=field.default, password=field.secret)
         else:
             value = Prompt.ask(prompt_text, default="", password=field.secret)
 
         value = value.strip()
         if not value and not field.required:
-            console.print("  [dim]Champ laisse vide[/dim]\n")
+            console.print(
+                "  [bright_green]✓ Champ enregistre comme [bold]vide[/bold] "
+                "pour cette session.[/bright_green]\n"
+            )
             return ""
         if not value and field.required:
             console.print("  [red]✘ Ce champ est obligatoire.[/red]\n")
@@ -342,6 +400,19 @@ def _ask_field(field: Field, current_value: str | None, can_go_back: bool) -> st
             if err:
                 console.print(f"  [red]✘ {err}[/red]\n")
                 continue
+        if value != (existing_value or ""):
+            console.print(
+                f"  [bright_green]✓ Nouvelle valeur enregistree pour cette session : "
+                f"[bold]{_mask_value(field, value)}[/bold][/bright_green]"
+            )
+            console.print(
+                "  [dim](tu la reverras si tu reviens ici avec [bold]p[/bold] ; "
+                "ecrite dans .env quand tu confirmeras a la fin)[/dim]\n"
+            )
+        else:
+            console.print(
+                "  [dim]✓ Valeur identique a celle deja dans .env (rien a changer)[/dim]\n"
+            )
         return value
 
 
@@ -349,7 +420,8 @@ def _legend_actions() -> None:
     console.print(
         "  [dim]💡 A chaque etape tu pourras taper :\n"
         "     [bold]g[/bold] = garder la valeur actuelle  •  "
-        "[bold]m[/bold] = modifier  •  [bold]v[/bold] = voir en clair  •  "
+        "[bold]m[/bold] = modifier  •  [bold]v[/bold] = voir en clair\n"
+        "     [bold]r[/bold] = restaurer la valeur .env d'origine (si tu as deja modifie)  •  "
         "[bold]p[/bold] = revenir au champ precedent[/dim]\n"
     )
 
@@ -460,18 +532,21 @@ def main() -> int:
     idx = 0
     while idx < len(FIELDS):
         f = FIELDS[idx]
-        current = existing.get(f.key, "") or values.get(f.key, "")
-        v = _ask_field(f, current if current else None, can_go_back=(idx > 0))
+        existing_v = existing.get(f.key, "")
+        staged_v = values.get(f.key)  # None = jamais visite, str (incl "") = visite
+        v = _ask_field(
+            f,
+            existing_v if existing_v else None,
+            staged_v,
+            can_go_back=(idx > 0),
+        )
         if v == _GO_BACK:
-            # Retour au champ precedent : on enleve sa valeur saisie et on recule
             idx = max(0, idx - 1)
-            prev_key = FIELDS[idx].key
-            if prev_key in values:
-                values.pop(prev_key)
-            console.print(f"[yellow]↩ Retour au champ precedent : {FIELDS[idx].label}[/yellow]\n")
+            console.print(
+                f"[yellow]↩ Retour au champ precedent : {FIELDS[idx].label}[/yellow]\n"
+            )
             continue
-        if v:
-            values[f.key] = v
+        values[f.key] = v
         idx += 1
 
     console.rule("[bold cyan]Recapitulatif", style="cyan")
