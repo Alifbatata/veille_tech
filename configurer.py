@@ -233,25 +233,26 @@ FIELDS: list[Field] = [
         label="📦 Taille des batchs envoyes a l'IA",
         description=(
             "Nombre d'articles que l'IA analyse en un seul appel.\n"
-            "Influence le nombre total de requetes API consommees par run.\n"
-            "Exemple : 200 articles + batch=20 -> 10 requetes ; batch=10 -> 20 requetes.\n\n"
+            "Influence directement le nombre de requetes API consommees par run.\n"
+            "Exemple : 210 articles + batch=30 -> 7 requetes ; batch=20 -> 11 ; batch=10 -> 21.\n\n"
             "  - PETIT (5-10)  : plus de requetes, reponses tres fiables\n"
-            "  - MOYEN (15-25) : equilibre - recommande\n"
-            "  - GRAND (30-50) : moins de requetes, economise le quota gratuit\n\n"
+            "  - MOYEN (20-30) : equilibre - DEFAUT (economise le quota gratuit\n"
+            "                    sans risque grace a l'auto-split en cas de troncature)\n"
+            "  - GRAND (40-50) : encore moins de requetes, pousse le modele a fond\n\n"
             "Bonne nouvelle : le pipeline gere automatiquement les troncatures.\n"
             "Si un batch est trop gros pour le modele (cas pathologique avec\n"
             "des articles a longues descriptions), il est detecte (finish_reason\n"
-            "== MAX_TOKENS) et splitte en 2 automatiquement. Tu peux donc laisser\n"
-            "20 par defaut sans risquer de perdre des articles."
+            "== MAX_TOKENS) et splitte en 2 automatiquement. Tu peux donc monter\n"
+            "le batch sans risquer de perdre des articles."
         ),
-        default="20",
+        default="30",
         instructions=(
-            "Tu peux laisser le defaut (20) dans 99 % des cas.\n"
+            "Tu peux laisser le defaut (30) dans 99 % des cas.\n"
             "Ne change que si :\n"
-            "  - Ton quota Gemini gratuit est tres tendu  -> monte a 30-40\n"
-            "  - Tu vois beaucoup de 'split-retry' dans les logs -> baisse a 10-15\n"
+            "  - Tu veux economiser encore plus de quota -> monte a 40-50\n"
+            "  - Tu vois beaucoup de 'split-retry' dans les logs -> baisse a 20\n"
             "    (signifie que ton modele tronque souvent ; baisser evite\n"
-            "     les appels supplementaires)"
+            "     les appels supplementaires de split)"
         ),
         required=False,
         validator=_validate_int_range(5, 50),

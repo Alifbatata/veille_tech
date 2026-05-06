@@ -7,7 +7,7 @@
 # Variables optionnelles :
 #   GEMINI_MODEL     — modèle à utiliser (défaut : gemini-2.5-flash)
 #   GEMINI_TIMEOUT   — timeout en secondes pour l'appel API (défaut : 60)
-#   AI_BATCH_SIZE    — nb d'articles par batch envoyé à Gemini (défaut : 20)
+#   AI_BATCH_SIZE    — nb d'articles par batch envoyé à Gemini (défaut : 30)
 # =============================================================================
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ logger = logging.getLogger("ai_filter")
 _API_KEY: str | None = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL: str = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_TIMEOUT: int = int(os.environ.get("GEMINI_TIMEOUT", "60"))
-AI_BATCH_SIZE: int = int(os.environ.get("AI_BATCH_SIZE", "20"))
+AI_BATCH_SIZE: int = int(os.environ.get("AI_BATCH_SIZE", "30"))
 
 # Tokens max par appel Gemini. 32768 = 4× le minimum historique de 8192.
 # Gemini 2.5 Flash supporte 65536 ; on prend 32768 pour avoir une marge sans

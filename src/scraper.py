@@ -974,6 +974,62 @@ def _normalize_url(url: str) -> str:
         return url.strip().rstrip("/").lower()
 
 
+# Suffixes typiques rajoutes par les flux d'agregation (Google News, etc.)
+# Ex: "Article title - Source name" ou "Article title — Le Monde". On les retire
+# pour comparer les titres entre flux RSS et flux d'agregation.
+# WHY l'espace OBLIGATOIRE avant le tiret : sans ca, on stripperait les tirets
+# internes des mots composes (ex: "Industrial-Grade Coatings" -> "Industrial").
+_AGGREGATOR_TITLE_SUFFIX = re.compile(r"\s+[-–—]\s+[^-–—]{1,60}$")
+
+
+def _normalize_title(title: str) -> str:
+    """Normalise un titre pour la dedup : minuscules, ponctuation strippee,
+    espaces normalises, suffixe ' - SourceName' typique de Google News retire.
+
+    WHY : le meme article peut etre publie sur le site source ET releve par
+    Google News, avec des URLs differentes (-> _normalize_url ne dedup pas)
+    mais des titres quasi-identiques. Sans cette etape, on envoie le meme
+    contenu deux fois au filtrage IA (gaspille du quota).
+    """
+    if not title:
+        return ""
+    s = title.strip()
+    # Retire le suffixe " - Source" / " — Source" typique de Google News
+    s = _AGGREGATOR_TITLE_SUFFIX.sub("", s)
+    s = s.lower()
+    # Strip ponctuation et caracteres speciaux (garde lettres/chiffres/espaces)
+    s = re.sub(r"[^\w\s]", " ", s, flags=re.UNICODE)
+    # Normalise espaces multiples
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _dedup_by_title(articles: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Deduplique par titre normalise. Si plusieurs articles ont le meme titre,
+    on garde celui dont le resume est le plus long (-> plus de signal pour l'IA).
+
+    Retourne (articles_dedup, nb_doublons_supprimes).
+    Articles sans titre exploitable sont conserves tels quels (pas de signal
+    pour dedup).
+    """
+    by_title: dict[str, dict[str, Any]] = {}
+    no_title: list[dict[str, Any]] = []
+    for a in articles:
+        norm = _normalize_title(a.get("title", ""))
+        if not norm:
+            no_title.append(a)
+            continue
+        existing = by_title.get(norm)
+        if existing is None:
+            by_title[norm] = a
+            continue
+        # Garde celui avec le resume le plus long
+        if len(a.get("summary", "")) > len(existing.get("summary", "")):
+            by_title[norm] = a
+    deduped = list(by_title.values()) + no_title
+    return deduped, len(articles) - len(deduped)
+
+
 def run_scraper(
     include_rss:               bool = True,
     include_gnews:             bool = True,
@@ -1163,7 +1219,18 @@ def run_scraper(
     raw_articles = list(unique_dict.values())
     deduped_count = len(all_articles) - len(raw_articles)
     if deduped_count > 0:
-        logger.info(f"🧹 Dédoublonnage : {deduped_count} doublon(s) éliminé(s) (URL normalisée).")
+        logger.info(f"🧹 Dédoublonnage URL : {deduped_count} doublon(s) éliminé(s).")
+
+    # Dédoublonnage par titre normalisé : capture le cas où le même article
+    # est référencé par RSS source ET Google News avec des URLs distinctes.
+    # Économise du quota Gemini (un article retenu dans le digest = un seul exemplaire).
+    raw_articles, title_dup_count = _dedup_by_title(raw_articles)
+    if title_dup_count > 0:
+        logger.info(
+            f"🧹 Dédoublonnage TITRE : {title_dup_count} doublon(s) éliminé(s) "
+            f"(même titre depuis sources différentes)."
+        )
+    deduped_count += title_dup_count
 
     # Filtrage mémoire (FIFO) : on compare les URLs normalisées vs seen_urls (qui contient des URLs brutes existantes)
     # Pour la rétro-compat, seen_urls.json continue à stocker les URLs brutes ; le check se fait sur la normalisée.

@@ -82,7 +82,8 @@ Document destiné aux développeurs qui maintiennent ou étendent le programme.
 - **Budget temps total estimé** : ~18-22h pour les 294 requêtes (compatible avec un run weekend non surveillé).
 
 **Post-traitement** :
-- Dédoublonnage par URL (clé : `link.strip().rstrip("/")`)
+- Dédoublonnage par **URL** : `_normalize_url` strip les params trackers (UTM, fbclid…), le fragment, le slash final, lowercase l'ensemble.
+- Dédoublonnage par **titre** : `_normalize_title` + `_dedup_by_title` capturent le cas où le même article apparaît via deux sources avec des URLs distinctes (RSS + Google News par ex.). Suffixe ` - SourceName` typique de Google News retiré, ponctuation et casse normalisées. En cas de collision, on conserve l'article au résumé le plus long (plus de signal pour l'IA).
 - Si `USE_MEMORY=True` : exclusion des URLs présentes dans `data/seen_urls.json`
 - Mise à jour de `seen_urls.json` (FIFO, max 10 000 entrées)
 
@@ -91,8 +92,8 @@ Document destiné aux développeurs qui maintiennent ou étendent le programme.
 ### Étape 3 — Filtrage IA (`ai_filter.py:filter_articles_with_ai`)
 
 **Découpage** :
-- Articles découpés en batchs de `AI_BATCH_SIZE` (défaut 20)
-- 165 articles → 9 batchs
+- Articles découpés en batchs de `AI_BATCH_SIZE` (défaut 30 — calibré pour minimiser les appels Gemini sans risque grâce à l'auto-split)
+- 165 articles → 6 batchs (avec batch=30)
 
 **Pour chaque batch** :
 1. `_build_user_prompt` formate les articles avec ID, source, titre, résumé tronqué à 400 chars
@@ -243,7 +244,7 @@ Implémentée comme un fichier JSON FIFO de 10 000 URLs max. Permet d'éviter d'
 | `data/targets.json` | `keywords` | 14 mots-clés | Termes scientifiques |
 | `.env` | `GEMINI_API_KEY` | — | Obligatoire |
 | `.env` | `GEMINI_MODEL` | `gemini-2.5-flash` | Modèle Gemini |
-| `.env` | `AI_BATCH_SIZE` | 20 | Articles par appel Gemini |
+| `.env` | `AI_BATCH_SIZE` | 30 | Articles par appel Gemini (auto-split en cas de troncature) |
 | `.env` | `GMAIL_USER` | — | Compte SMTP expéditeur |
 | `.env` | `GMAIL_PASSWORD` | — | App password 16 chars |
 | `.env` | `MAIL_RECIPIENT` | `GMAIL_USER` | Liste virgule-séparée |
@@ -277,7 +278,7 @@ Implémentée comme un fichier JSON FIFO de 10 000 URLs max. Permet d'éviter d'
 
 | Service | Quota free tier | Conso par run |
 |---|---|---|
-| Gemini 2.5 Flash | 250 req/jour (free) | ~10 req (9 batchs + 1 résumé) |
+| Gemini 2.5 Flash | 250 req/jour (free) | ~7 req (6 batchs + 1 résumé) avec batch=30 et dédup titre |
 | Gemini 2.5 Flash Lite (fallback #1) | 1000 req/jour (free) | activé uniquement si le modèle principal sature |
 | Gemma 3 27B IT (fallback #2) | quotas free indépendants | activé si #1 sature aussi |
 | Gemma 3 12B IT (fallback #3) | quotas free indépendants | dernière roue de secours, activé si #2 sature aussi |
