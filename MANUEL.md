@@ -204,18 +204,28 @@ Tu verras défiler des logs comme ceci :
 
 ## 5. Vais-je recevoir les mêmes articles à chaque run ?
 
-**Réponse courte : non.** La mémoire est désormais activée (`USE_MEMORY = True` dans `src/config.py`).
+**Tu décides à chaque lancement.** Au démarrage, le programme te demande dans **Étape 2/4 : mémoire** comment tu veux gérer les articles déjà envoyés.
 
-**Comment ça marche :**
+**Trois choix possibles :**
+
+| Touche | Mode | Quand l'utiliser |
+|--------|------|------------------|
+| **F** (défaut) | **Filtrer** les articles déjà envoyés | Run hebdo normal — tu ne veux que des nouveautés |
+| **T** | **Tout renvoyer** sans filtre | Test, démo, ou rattrapage |
+| **R** | **Réinitialiser** la mémoire (effacer `seen_urls.json`) puis filtrer | Nouvelle équipe destinataire, ou repartir propre |
+
+**Comment fonctionne le filtre :**
 - Chaque article que tu reçois a une URL unique
-- Cette URL est sauvegardée dans `data/seen_urls.json`
-- Au prochain run, ces URLs sont automatiquement filtrées
+- Cette URL est sauvegardée dans `data/seen_urls.json` (max 10 000 entrées, FIFO)
+- Au prochain run en mode **F**, ces URLs sont automatiquement exclues du digest
 
 **Concrètement :**
 - Aujourd'hui tu as reçu 49 articles → leurs URLs sont mémorisées
 - Lundi prochain, le programme va re-scraper ~165 articles bruts
-- Mais il en filtrera ~49 (ceux déjà envoyés)
+- En mode **F**, il en filtrera ~49 (ceux déjà envoyés)
 - Tu recevras donc **uniquement les nouveautés** de la semaine
+
+**Pour les runs automatisés (cron / Planificateur Windows)** : sans interaction utilisateur, le défaut est **T (tout renvoyer)**. Pour activer le filtre dans un run automatisé, exporte la variable d'environnement `USE_MEMORY=true` avant `python main.py`.
 
 ---
 
@@ -263,12 +273,12 @@ python send_recap.py "test@test.com" --dry-run
 
 ## 7. Options avancées de la mémoire
 
-**Si tu veux RE-recevoir les anciens articles** (ex: reset complet) :
-- Supprime simplement le fichier `data/seen_urls.json`
-- Au prochain run, plus rien n'est filtré
+**Au lancement interactif** (`lancer.bat` ou `python main.py`) : utilise les choix **F/T/R** à l'Étape 2/4 (voir §5).
 
-**Si tu veux forcer un mode "tout renvoyer à chaque fois"** :
-- Édite `src/config.py` et remets `USE_MEMORY: bool = False`
+**Pour un run automatisé (cron, Planificateur Windows) :**
+- Variable d'env `USE_MEMORY=true` → active le filtre
+- Variable d'env `USE_MEMORY=false` (ou absente) → désactive le filtre
+- Pour réinitialiser la mémoire en mode automatisé : supprime le fichier `data/seen_urls.json` avant le lancement
 
 ---
 
@@ -299,7 +309,7 @@ Tous les paramètres sont dans **`src/config.py`** :
 |---|---|---|
 | `MAX_ARTICLES_PER_SOURCE` | 50 | Nombre max d'articles pris par flux RSS |
 | `RECENT_DAYS_LIMIT` | 90 | Articles plus vieux ignorés (en jours) |
-| `USE_MEMORY` | True | Évite les doublons d'un run à l'autre |
+| `USE_MEMORY` | False (par défaut) ou choisi à l'Étape 2/4 du lancement interactif | Active le filtre des URLs déjà envoyées |
 | `SCRAPE_LIMIT_MONTH` | True | Active le filtre de fraîcheur |
 
 Pour changer la liste des concurrents ou des mots-clés : éditer **`data/targets.json`**.

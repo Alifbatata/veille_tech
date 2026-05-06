@@ -49,7 +49,10 @@ SOURCES_RSS: list[dict[str, str]] = [
 DATA_DIR: str = "../data"
 MAX_ARTICLES_PER_SOURCE: int = 50   # articles récupérés par flux et par run
 LANGUAGE: str = "fr"                # langue de synthèse Gemini ("fr" ou "en")
-USE_MEMORY: bool = False              # Si True, filtre les URLs déjà envoyées (évite les doublons d'un run à l'autre)
+USE_MEMORY: bool = os.environ.get("USE_MEMORY", "false").lower() in ("true", "1", "yes")
+# WHY env var : main.py:_memory_choice_step propose à l'utilisateur de choisir
+# au lancement (filtrer / tout renvoyer / reset). Le défaut "false" préserve
+# le comportement historique pour les runs non-interactifs (CI, cron).
 SCRAPE_LIMIT_MONTH: bool = True      # Si True, applique RECENT_DAYS_LIMIT comme fenêtre de fraîcheur
 RECENT_DAYS_LIMIT: int = 90          # Fenêtre de fraîcheur (jours). Veille techno de niche → 90j adapté
 

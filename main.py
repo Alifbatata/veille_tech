@@ -212,16 +212,23 @@ def _interactive_pre_run() -> int | None:
 
     # ----- ETAPE 1 : Verification heure -----
     console.print("\n[bold blue]══════════════════════════════════════════════════════════════[/bold blue]")
-    console.print("[bold blue]  Etape 1/3 : verification de l'heure                         [/bold blue]")
+    console.print("[bold blue]  Etape 1/4 : verification de l'heure                         [/bold blue]")
     console.print("[bold blue]══════════════════════════════════════════════════════════════[/bold blue]\n")
     _check_hour_warning(console, Confirm, Panel, Text)
-    _press_enter_to_continue(console, "Etape 1 terminee. La prochaine etape affichera la liste de tes cibles.")
+    _press_enter_to_continue(console, "Etape 1 terminee. Etape suivante : choix de la memoire des articles.")
 
-    # ----- ETAPES 2 (cibles) + 3 (volume) + recap, avec boucle de retour -----
+    # ----- ETAPE 2 : Memoire des articles deja envoyes -----
+    console.print("\n[bold blue]══════════════════════════════════════════════════════════════[/bold blue]")
+    console.print("[bold blue]  Etape 2/4 : memoire des articles deja envoyes               [/bold blue]")
+    console.print("[bold blue]══════════════════════════════════════════════════════════════[/bold blue]\n")
+    _memory_choice_step(console, Panel, Prompt, Confirm)
+    _press_enter_to_continue(console, "Etape 2 terminee. Etape suivante : tes cibles.")
+
+    # ----- ETAPES 3 (cibles) + 4 (volume) + recap, avec boucle de retour -----
     while True:
-        # ----- ETAPE 2 : cibles -----
+        # ----- ETAPE 3 : cibles -----
         console.print("\n[bold blue]══════════════════════════════════════════════════════════════[/bold blue]")
-        console.print("[bold blue]  Etape 2/3 : cibles (entreprises + mots-cles)                [/bold blue]")
+        console.print("[bold blue]  Etape 3/4 : cibles (entreprises + mots-cles)                [/bold blue]")
         console.print("[bold blue]══════════════════════════════════════════════════════════════[/bold blue]\n")
         _show_targets(console, Table, Panel)
         _press_enter_to_continue(console, "Prends le temps de lire les cibles ci-dessus.")
@@ -229,27 +236,27 @@ def _interactive_pre_run() -> int | None:
         edit_msg = (
             "  [bold]Veux-tu modifier ces cibles avant de lancer le pipeline ?[/bold]\n"
             "  [dim]Tape [bold]y[/bold] (yes = oui) pour ouvrir le menu d'edition, "
-            "ou [bold]n[/bold] (non) pour passer directement a l'etape 3.\n"
+            "ou [bold]n[/bold] (non) pour passer directement a l'etape 4.\n"
             "  Si tu appuies juste sur [bold]Entree[/bold] sans rien taper, ce sera "
             "[bold]n (non)[/bold] par defaut.[/dim]"
         )
         if Confirm.ask(edit_msg, default=False):
             _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm)
 
-        # ----- ETAPE 3 : volume + retour eventuel -----
+        # ----- ETAPE 4 : volume + retour eventuel -----
         console.print("\n[bold blue]══════════════════════════════════════════════════════════════[/bold blue]")
-        console.print("[bold blue]  Etape 3/3 : volume d'articles par source                    [/bold blue]")
+        console.print("[bold blue]  Etape 4/4 : volume d'articles par source                    [/bold blue]")
         console.print("[bold blue]══════════════════════════════════════════════════════════════[/bold blue]\n")
         nb = _choose_volume(console, Table, Panel, Prompt, IntPrompt)
         if nb is None:
             # L'utilisateur a tape "r" pour revenir aux cibles
-            console.print("[yellow]↩ Retour a l'etape 2 (cibles)…[/yellow]\n")
+            console.print("[yellow]↩ Retour a l'etape 3 (cibles)…[/yellow]\n")
             continue
 
         # ----- Recap final + confirmation -----
         if _show_recap_and_confirm(console, Panel, Confirm, nb):
             return nb
-        console.print("[yellow]↩ Retour a l'etape 2 (cibles) pour modifier ta config…[/yellow]\n")
+        console.print("[yellow]↩ Retour a l'etape 3 (cibles) pour modifier ta config…[/yellow]\n")
 
 
 def _press_enter_to_continue(console, intro: str = "") -> None:
@@ -278,6 +285,120 @@ def _press_enter_to_continue(console, intro: str = "") -> None:
             input("  >>> Appuie sur la touche ENTREE pour continuer... ")
         except (EOFError, KeyboardInterrupt):
             pass
+
+
+# Module-level : memorise le choix de l'utilisateur pour affichage dans le recap
+# (et pour info dans les logs au demarrage du pipeline). Set par
+# _memory_choice_step(), lu par _show_recap_and_confirm() et main().
+_memory_choice_label: str = ""
+
+
+def _memory_choice_step(console, Panel, Prompt, Confirm) -> None:
+    """Etape memoire : filtrer / tout renvoyer / reset.
+
+    Effets de bord :
+      - met a jour os.environ['USE_MEMORY'] = 'true' ou 'false'
+      - met a jour le label module-level _memory_choice_label
+      - en mode reset : supprime data/seen_urls.json (avec confirmation)
+
+    main() doit ensuite propager le choix au scraper via :
+        scraper.USE_MEMORY = (os.environ.get('USE_MEMORY') == 'true')
+    """
+    global _memory_choice_label
+
+    seen_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "data", "seen_urls.json"
+    )
+    seen_count = 0
+    if os.path.exists(seen_path):
+        try:
+            with open(seen_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    seen_count = len(data)
+        except (json.JSONDecodeError, OSError):
+            seen_count = 0
+
+    body = (
+        f"  [bold]📚 Etat actuel[/bold]\n"
+        f"     • [cyan]{seen_count}[/cyan] URLs deja stockees dans "
+        f"[dim]data/seen_urls.json[/dim]\n\n"
+        "  [bold]Que veux-tu pour CE run ?[/bold]\n\n"
+        "  [bold green][F][/bold green]iltrer les articles deja envoyes     "
+        "[dim]>>> RECOMMANDE pour digest hebdomadaire[/dim]\n"
+        "      Le digest ne contiendra QUE des articles nouveaux.\n\n"
+        "  [bold yellow][T][/bold yellow]out renvoyer (sans filtre)\n"
+        "      Tu recevras meme les articles deja envoyes precedemment\n"
+        "      (utile pour un test ou un rattrapage).\n\n"
+        "  [bold red][R][/bold red]einitialiser la memoire (effacer)\n"
+        "      [red]/!\\ irreversible[/red] : vide seen_urls.json puis applique le filtre normal.\n"
+        "      Utile si tu changes de destinataires ou apres une longue pause."
+    )
+    console.print(Panel(
+        body, border_style="cyan", padding=(1, 2),
+        title="🧠 Memoire des articles deja envoyes",
+    ))
+
+    choice = Prompt.ask(
+        "  [bold]Ton choix[/bold] [dim](Entree = F filtrer)[/dim]",
+        choices=["f", "t", "r", "F", "T", "R"],
+        default="f",
+        show_choices=False,
+        show_default=False,
+    ).lower()
+    console.print()
+
+    if choice == "f":
+        os.environ["USE_MEMORY"] = "true"
+        _memory_choice_label = (
+            f"FILTRER ({seen_count} articles deja envoyes seront exclus)"
+            if seen_count > 0
+            else "FILTRER (memoire vide pour le moment)"
+        )
+        console.print(
+            f"  [green]✓ Mode FILTRE active. "
+            f"{seen_count} articles deja envoyes seront exclus.[/green]\n"
+        )
+        return
+
+    if choice == "t":
+        os.environ["USE_MEMORY"] = "false"
+        _memory_choice_label = "TOUT RENVOYER (pas de filtre cette fois)"
+        console.print(
+            "  [yellow]✓ Mode TOUT RENVOYER active. "
+            "Aucun filtre applique pour ce run.[/yellow]\n"
+        )
+        return
+
+    # choice == "r" : reset
+    if seen_count > 0:
+        confirmed = Confirm.ask(
+            f"  [red]/!\\[/red]  Ceci va effacer [bold]{seen_count}[/bold] "
+            "URLs de la memoire. Confirmer ?",
+            default=False,
+        )
+        if not confirmed:
+            os.environ["USE_MEMORY"] = "true"
+            _memory_choice_label = (
+                f"FILTRER ({seen_count} URLs - reset annule)"
+            )
+            console.print(
+                "  [yellow]Reset annule. Mode FILTRE active a la place.[/yellow]\n"
+            )
+            return
+    try:
+        if os.path.exists(seen_path):
+            os.remove(seen_path)
+        console.print(
+            f"  [green]✓ Memoire reinitialisee : {seen_count} URLs effacees.[/green]"
+        )
+    except OSError as e:
+        console.print(
+            f"  [yellow]⚠️  Impossible de supprimer {seen_path} : {e}[/yellow]"
+        )
+    os.environ["USE_MEMORY"] = "true"
+    _memory_choice_label = f"RESET ({seen_count} URLs effacees) puis FILTRER"
+    console.print()
 
 
 def _check_hour_warning(console, Confirm, Panel, Text) -> None:
@@ -592,11 +713,13 @@ def _show_recap_and_confirm(console, Panel, Confirm, nb_articles: int) -> bool:
         targets = json.load(f)
     nb_q = len(targets.get("companies", [])) * len(targets.get("keywords", []))
 
+    mem_label = _memory_choice_label or "mode par defaut (config.py)"
     summary = (
         f"  [bold]🏢  Entreprises surveillees :[/bold] {len(targets.get('companies', []))}\n"
         f"  [bold]🔑  Mots-cles techniques :[/bold] {len(targets.get('keywords', []))}\n"
         f"  [bold]📦  Articles par source RSS :[/bold] [cyan]{nb_articles}[/cyan]\n"
         f"  [bold]🔍  Requetes Google News :[/bold] [cyan]{nb_q}[/cyan]\n"
+        f"  [bold]🧠  Memoire :[/bold] [cyan]{mem_label}[/cyan]\n"
         f"\n  [dim]Si tout est correct, le programme va demarrer le pipeline complet "
         f"(RSS + arXiv + OpenAlex + Crossref + HAL + Semantic Scholar + Tavily + Google News + IA + email).[/dim]"
     )
@@ -616,7 +739,7 @@ def main() -> None:
     from dotenv import load_dotenv
     load_dotenv()
 
-    # Pre-run interactif (banner + check heure + choix volume articles)
+    # Pre-run interactif (banner + check heure + memoire + cibles + volume)
     chosen_max = _interactive_pre_run()
     if chosen_max is not None:
         # Override dynamique de la constante MAX_ARTICLES_PER_SOURCE dans scraper
@@ -624,6 +747,17 @@ def main() -> None:
         import src.scraper as _scraper_mod
         _scraper_mod.MAX_ARTICLES_PER_SOURCE = chosen_max
         logger.info("📊 MAX_ARTICLES_PER_SOURCE configure a %d (choix utilisateur)", chosen_max)
+
+        # Propage le choix memoire de l'utilisateur (set par _memory_choice_step)
+        # via os.environ vers le module scraper. Patch direct car config.py a
+        # deja ete lu au top-level import.
+        env_use_memory = os.environ.get("USE_MEMORY", "false").lower() in ("true", "1", "yes")
+        _scraper_mod.USE_MEMORY = env_use_memory
+        logger.info(
+            "🧠 USE_MEMORY=%s (choix utilisateur : %s)",
+            env_use_memory,
+            _memory_choice_label or "non specifie",
+        )
 
     logger.info("🚀 Démarrage de l'orchestrateur de veille technologique")
     _validate_env()
