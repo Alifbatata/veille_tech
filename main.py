@@ -148,9 +148,137 @@ def send_error_email(error_msg: str) -> None:
         logger.error("❌ Échec de l'envoi de l'email d'erreur : %s", e)
 
 
+def _interactive_pre_run() -> int | None:
+    """Pre-run interactif : banner stylise + check heure + choix volume.
+
+    Affiche un panneau d'accueil, avertit si l'heure locale est avant 9h
+    (les quotas Google AI Studio se renouvellent a minuit Pacific Time =
+    ~9h heure suisse), puis propose 5 presets de volume d'articles par
+    source RSS.
+
+    Returns:
+        Nouvelle valeur de MAX_ARTICLES_PER_SOURCE choisie par l'utilisateur,
+        ou None si on doit garder la valeur de config.py (mode non-interactif
+        par exemple si stdin n'est pas un TTY — execution via cron/CI).
+    """
+    # En mode non-interactif (CI, redirection), on n'embete personne
+    if not sys.stdin.isatty():
+        return None
+
+    try:
+        from rich.console import Console
+        from rich.panel import Panel
+        from rich.prompt import Prompt, Confirm
+        from rich.table import Table
+        from rich.text import Text
+        from rich.align import Align
+    except ImportError:
+        # rich pas installe — on retombe en mode silencieux pour ne pas bloquer
+        logger.warning("rich non installe — mode interactif desactive. Lance 'pip install rich' "
+                       "pour activer le menu de demarrage stylise.")
+        return None
+
+    console = Console()
+
+    # Banner d'accueil
+    title = Text()
+    title.append("\n  🛰️  VEILLE TECHNOLOGIQUE\n", style="bold cyan")
+    title.append("  Pipeline complet : RSS + arXiv + OpenAlex + Crossref + HAL + SS + Tavily + Google News + IA",
+                 style="dim cyan")
+    console.print(Panel(Align.center(title), border_style="cyan", padding=(1, 2)))
+    console.print()
+
+    # Verification heure
+    now = datetime.now()
+    if 0 <= now.hour < 9:
+        warn = Text()
+        warn.append("⚠️  Il est ", style="bold yellow")
+        warn.append(f"{now.strftime('%Hh%M')}", style="bold red")
+        warn.append(" — les quotas gratuits Google AI Studio se renouvellent a ", style="yellow")
+        warn.append("minuit Pacific Time", style="bold yellow")
+        warn.append(" (= ", style="yellow")
+        warn.append("9h heure suisse", style="bold green")
+        warn.append("). Si tu lances maintenant et que tu as fait des tests aujourd'hui, "
+                    "il est probable que les premiers modeles de la cascade soient deja epuises "
+                    "et que le programme bascule vite vers les fallbacks.\n\n",
+                    style="yellow")
+        warn.append("💡 Recommandation : ", style="bold")
+        warn.append("attendre ", style="white")
+        warn.append("9h00", style="bold green")
+        warn.append(" pour avoir les quotas frais (le programme tournera environ 18h).",
+                    style="white")
+        console.print(Panel(warn, title="🕐 Verification de l'heure", border_style="yellow"))
+        if not Confirm.ask("\n  Continuer quand meme maintenant ?", default=False):
+            console.print("[yellow]Annule. Relance le programme apres 9h.[/yellow]")
+            sys.exit(0)
+    else:
+        ok = Text()
+        ok.append("✅ Il est ", style="bold green")
+        ok.append(f"{now.strftime('%Hh%M')}", style="bold green")
+        ok.append(" — les quotas Google AI Studio devraient etre frais.", style="green")
+        console.print(Panel(ok, title="🕐 Verification de l'heure", border_style="green"))
+    console.print()
+
+    # Choix du volume d'articles par source
+    presets = [
+        ("1", "🚀  Test rapide",       25,  "~5 min", "Pour valider que tout fonctionne avant un vrai run."),
+        ("2", "📰  Standard hebdo",    50,  "~3-4h",  "Usage normal hebdomadaire. Suffisant si tu lances chaque semaine."),
+        ("3", "📚  Approfondi",       100,  "~8-10h", "Plus de couverture. Bon compromis si tu lances tous les 15 jours."),
+        ("4", "🏆  Marathon weekend", 200,  "~18-22h", "Couverture maximale. Recommande si tu lances 1x/mois ou apres une longue pause."),
+        ("5", "✏️   Personnalise",      0,  "?",      "Tu choisis le nombre toi-meme."),
+    ]
+
+    table = Table(title="Combien d'articles veux-tu collecter par source RSS ?",
+                  border_style="cyan", show_lines=True)
+    table.add_column("#", style="bold cyan", justify="center")
+    table.add_column("Preset", style="bold")
+    table.add_column("Articles / source", justify="right", style="green")
+    table.add_column("Duree estimee", justify="center", style="yellow")
+    table.add_column("Recommande pour")
+
+    for choice, name, nb, dur, desc in presets:
+        nb_label = str(nb) if nb else "personnalise"
+        table.add_row(choice, name, nb_label, dur, desc)
+    console.print(table)
+    console.print(
+        "\n  [dim]Note : ce nombre s'applique aux flux RSS uniquement. Les autres sources "
+        "(arXiv, OpenAlex, Crossref, HAL, Tavily, Semantic Scholar, Google News) sont fixes.[/dim]\n"
+    )
+
+    chosen = Prompt.ask("  [bold]Ton choix[/bold]", choices=["1", "2", "3", "4", "5"], default="2")
+    if chosen == "5":
+        nb = int(Prompt.ask("  [bold]Nombre d'articles par source[/bold] (entre 5 et 1000)",
+                            default="50"))
+        nb = max(5, min(1000, nb))
+    else:
+        nb = next(p[2] for p in presets if p[0] == chosen)
+
+    console.print()
+    summary = Text()
+    summary.append("✅ Volume choisi : ", style="bold green")
+    summary.append(f"{nb}", style="bold cyan")
+    summary.append(" articles par source RSS\n", style="green")
+    summary.append("   Le programme va maintenant demarrer le pipeline complet.\n", style="dim")
+    summary.append("   Les logs detailles defilent ci-dessous. Les fichiers logs sont aussi sauves dans logs/veille.log",
+                   style="dim")
+    console.print(Panel(summary, title="🎬 Lancement", border_style="green"))
+    console.print()
+    return nb
+
+
 def main() -> None:
     from dotenv import load_dotenv
     load_dotenv()
+
+    # Pre-run interactif (banner + check heure + choix volume articles)
+    chosen_max = _interactive_pre_run()
+    if chosen_max is not None:
+        # Override dynamique de la constante MAX_ARTICLES_PER_SOURCE dans scraper
+        # (importee depuis config — on patch le module scraper pour propager).
+        import src.scraper as _scraper_mod
+        _scraper_mod.MAX_ARTICLES_PER_SOURCE = chosen_max
+        logger.info("📊 MAX_ARTICLES_PER_SOURCE configure a %d (choix utilisateur)", chosen_max)
+
     logger.info("🚀 Démarrage de l'orchestrateur de veille technologique")
     _validate_env()
 

@@ -2,6 +2,8 @@
 
 Ce document s'adresse à toute personne qui veut **utiliser** le programme, sans connaissance technique préalable.
 
+> 🆕 **Pour les vrais novices** : il existe maintenant un guide encore plus accessible avec des explications pas à pas et un lanceur Windows en double-clic. Voir [`COMMENT_CA_MARCHE.md`](COMMENT_CA_MARCHE.md) ou utiliser directement `lancer.bat`.
+
 ---
 
 ## 1. À quoi sert ce programme ?
@@ -69,10 +71,48 @@ MAIL_RECIPIENT=mahmoud.unjeunearabe@gmail.com,mahmoud.alimohamad@positivecoating
 
 ## 3. Comment lancer le programme
 
+### Option A — Double-clic sur `lancer.bat` (recommandé pour novice)
+
+Va simplement dans le dossier du projet et **double-clique sur `lancer.bat`**.
+Le script va automatiquement :
+- Vérifier que Python est installé
+- Créer l'environnement virtuel si absent
+- Installer les dépendances si manquantes
+- Lancer l'assistant `configurer.py` si `.env` n'existe pas
+- Démarrer `main.py`
+
+C'est la méthode la plus simple — aucune ligne de commande à taper.
+
+### Option B — En ligne de commande (PowerShell)
+
 Dans PowerShell, depuis le dossier du projet :
 
 ```powershell
 python main.py
+```
+
+### 🕐 IMPORTANT — quand lancer le programme
+
+> **Lance le programme APRÈS 9h00 heure suisse** pour bénéficier des quotas IA frais.
+>
+> **Pourquoi ?** Les quotas gratuits Google AI Studio se renouvellent à minuit Pacific Time, ce qui correspond à **9h00 en Suisse**. Si tu lances avant 9h, tu utilises potentiellement les restes de quota de la veille.
+>
+> Le programme te le rappelle automatiquement au démarrage : un avertissement orange s'affiche si l'heure locale est entre minuit et 9h.
+
+### 🔑 Modifier ta configuration sans tout recréer
+
+Pour changer une clé API ou ajouter un destinataire d'email, lance simplement :
+
+```powershell
+python configurer.py
+```
+
+L'assistant te montre chaque champ existant et te propose de le **garder**, le **modifier** ou le **voir en clair**.
+
+Pour vérifier seulement (sans modifier) que ta config est complète :
+
+```powershell
+python configurer.py --check
 ```
 
 Tu verras défiler des logs comme ceci :
