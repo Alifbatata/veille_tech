@@ -277,14 +277,25 @@ def _print_field_card(field: Field, current_value: str | None) -> None:
     console.print(Panel(body, title=title, border_style="cyan", padding=(1, 2)))
 
 
-def _ask_field(field: Field, current_value: str | None) -> str:
+_GO_BACK = "__GO_BACK__"  # sentinelle pour indiquer "retour au champ precedent"
+
+
+def _ask_field(field: Field, current_value: str | None, can_go_back: bool) -> str:
+    """Pose la question pour un champ. Retourne la valeur OU _GO_BACK si l'utilisateur
+    veut revenir au champ precedent."""
     while True:
         _print_field_card(field, current_value)
 
         if current_value:
+            actions = ["g", "m", "v"] + (["p"] if can_go_back else [])
+            actions_label = (
+                "  [bold]g[/bold]arder • [bold]m[/bold]odifier • [bold]v[/bold]oir en clair"
+                + (" • [bold]p[/bold]recedent" if can_go_back else "")
+            )
+            console.print(actions_label)
             choice = Prompt.ask(
-                "  [bold]Action[/bold]",
-                choices=["g", "m", "v"],
+                "  [bold]Que veux-tu faire ?[/bold]",
+                choices=actions,
                 default="g",
                 show_choices=False,
             )
@@ -294,12 +305,26 @@ def _ask_field(field: Field, current_value: str | None) -> str:
             if choice == "v":
                 console.print(f"  Valeur en clair : [bold]{current_value}[/bold]\n")
                 continue
+            if choice == "p":
+                return _GO_BACK
         else:
-            choice = "m"
+            if can_go_back:
+                console.print(
+                    "  [dim]Tape [bold]p[/bold] pour revenir au champ precedent, "
+                    "ou laisse vide pour saisir maintenant.[/dim]"
+                )
+                first = Prompt.ask(
+                    "  [bold]Action[/bold]",
+                    choices=["s", "p"],
+                    default="s",
+                    show_choices=False,
+                )
+                if first == "p":
+                    return _GO_BACK
 
         prompt_text = "  [bold]Saisis la valeur[/bold]"
         if not field.required:
-            prompt_text += " (Entree pour vide)"
+            prompt_text += " [dim](laisse vide et appuie Entree pour passer)[/dim]"
         if field.default and not current_value:
             value = Prompt.ask(prompt_text, default=field.default, password=field.secret)
         else:
@@ -322,10 +347,10 @@ def _ask_field(field: Field, current_value: str | None) -> str:
 
 def _legend_actions() -> None:
     console.print(
-        "  [dim]Actions disponibles : "
-        "[bold]g[/bold]arder la valeur • "
-        "[bold]m[/bold]odifier • "
-        "[bold]v[/bold]oir en clair[/dim]\n"
+        "  [dim]💡 A chaque etape tu pourras taper :\n"
+        "     [bold]g[/bold] = garder la valeur actuelle  •  "
+        "[bold]m[/bold] = modifier  •  [bold]v[/bold] = voir en clair  •  "
+        "[bold]p[/bold] = revenir au champ precedent[/dim]\n"
     )
 
 
@@ -419,14 +444,25 @@ def main() -> int:
 
     console.rule("[bold cyan]Configuration etape par etape", style="cyan")
     console.print()
-    _legend_actions() if existing else console.print()
+    _legend_actions()
 
     values: dict[str, str] = {}
-    for f in FIELDS:
-        current = existing.get(f.key, "")
-        v = _ask_field(f, current if current else None)
+    idx = 0
+    while idx < len(FIELDS):
+        f = FIELDS[idx]
+        current = existing.get(f.key, "") or values.get(f.key, "")
+        v = _ask_field(f, current if current else None, can_go_back=(idx > 0))
+        if v == _GO_BACK:
+            # Retour au champ precedent : on enleve sa valeur saisie et on recule
+            idx = max(0, idx - 1)
+            prev_key = FIELDS[idx].key
+            if prev_key in values:
+                values.pop(prev_key)
+            console.print(f"[yellow]↩ Retour au champ precedent : {FIELDS[idx].label}[/yellow]\n")
+            continue
         if v:
             values[f.key] = v
+        idx += 1
 
     console.rule("[bold cyan]Recapitulatif", style="cyan")
     console.print()

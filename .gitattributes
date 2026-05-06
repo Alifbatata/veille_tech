@@ -1,0 +1,11 @@
+# Force les fins de ligne CRLF pour les scripts Windows (.bat / .cmd)
+# Sinon Git peut convertir en LF lors d'un clone sur autre OS, ce qui casse cmd.exe
+*.bat        text eol=crlf
+*.cmd        text eol=crlf
+*.ps1        text eol=crlf
+
+# Force les fins de ligne LF pour les scripts Unix
+*.sh         text eol=lf
+
+# Auto-detection pour le reste
+*            text=auto

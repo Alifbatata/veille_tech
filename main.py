@@ -149,17 +149,18 @@ def send_error_email(error_msg: str) -> None:
 
 
 def _interactive_pre_run() -> int | None:
-    """Pre-run interactif : banner stylise + check heure + choix volume.
+    """Pre-run interactif : banner + check heure + edition cibles + choix volume + recap.
 
-    Affiche un panneau d'accueil, avertit si l'heure locale est avant 9h
-    (les quotas Google AI Studio se renouvellent a minuit Pacific Time =
-    ~9h heure suisse), puis propose 5 presets de volume d'articles par
-    source RSS.
+    Etapes :
+      1. Banner d'accueil
+      2. Verification heure locale (warn si avant 9h Suisse)
+      3. Affichage et edition optionnelle des cibles (entreprises + mots-cles)
+      4. Choix du volume d'articles par source RSS (5 presets + personnalise)
+      5. Recapitulatif final avec confirmation (boucle si l'utilisateur veut corriger)
 
     Returns:
         Nouvelle valeur de MAX_ARTICLES_PER_SOURCE choisie par l'utilisateur,
-        ou None si on doit garder la valeur de config.py (mode non-interactif
-        par exemple si stdin n'est pas un TTY — execution via cron/CI).
+        ou None si stdin n'est pas un TTY (mode CI/cron, pre-run skippe).
     """
     # En mode non-interactif (CI, redirection), on n'embete personne
     if not sys.stdin.isatty():
@@ -168,27 +169,55 @@ def _interactive_pre_run() -> int | None:
     try:
         from rich.console import Console
         from rich.panel import Panel
-        from rich.prompt import Prompt, Confirm
+        from rich.prompt import Prompt, Confirm, IntPrompt
         from rich.table import Table
         from rich.text import Text
         from rich.align import Align
     except ImportError:
-        # rich pas installe — on retombe en mode silencieux pour ne pas bloquer
         logger.warning("rich non installe — mode interactif desactive. Lance 'pip install rich' "
                        "pour activer le menu de demarrage stylise.")
         return None
 
     console = Console()
 
-    # Banner d'accueil
+    # ----- Banner d'accueil -----
     title = Text()
     title.append("\n  🛰️  VEILLE TECHNOLOGIQUE\n", style="bold cyan")
     title.append("  Pipeline complet : RSS + arXiv + OpenAlex + Crossref + HAL + SS + Tavily + Google News + IA",
                  style="dim cyan")
     console.print(Panel(Align.center(title), border_style="cyan", padding=(1, 2)))
     console.print()
+    console.print(
+        "  [dim]💡 Astuce : a chaque etape, tu peux taper le NUMERO de ton choix dans le tableau "
+        "qui s'affiche ci-dessous. Le chiffre [bold cyan]entre parentheses (n)[/bold cyan] "
+        "est la valeur par defaut si tu appuies juste sur la touche Entree sans rien taper.[/dim]\n"
+    )
 
-    # Verification heure
+    # ----- 1. Verification heure -----
+    _check_hour_warning(console, Confirm, Panel, Text)
+
+    # ----- 2. Affichage / edition cibles + 3. choix volume + 4. recap, en boucle -----
+    while True:
+        _show_targets(console, Table, Panel)
+
+        # Demande si on veut editer les cibles
+        edit_msg = (
+            "  [bold]Veux-tu modifier ces cibles avant de lancer ?[/bold] "
+            "[dim](o = oui, n = non/continuer)[/dim]"
+        )
+        if Confirm.ask(edit_msg, default=False):
+            _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm)
+
+        nb = _choose_volume(console, Table, Panel, Prompt, IntPrompt)
+
+        # ----- Recap final + confirmation -----
+        if _show_recap_and_confirm(console, Panel, Confirm, nb):
+            return nb
+        # Sinon on reboucle : retour au choix des cibles
+
+
+def _check_hour_warning(console, Confirm, Panel, Text) -> None:
+    """Verifie l'heure locale et previent si avant 9h (quotas Google reset)."""
     now = datetime.now()
     if 0 <= now.hour < 9:
         warn = Text()
@@ -199,14 +228,11 @@ def _interactive_pre_run() -> int | None:
         warn.append(" (= ", style="yellow")
         warn.append("9h heure suisse", style="bold green")
         warn.append("). Si tu lances maintenant et que tu as fait des tests aujourd'hui, "
-                    "il est probable que les premiers modeles de la cascade soient deja epuises "
-                    "et que le programme bascule vite vers les fallbacks.\n\n",
+                    "il est probable que les premiers modeles de la cascade soient deja epuises.\n\n",
                     style="yellow")
-        warn.append("💡 Recommandation : ", style="bold")
-        warn.append("attendre ", style="white")
+        warn.append("💡 Recommandation : attendre ", style="bold")
         warn.append("9h00", style="bold green")
-        warn.append(" pour avoir les quotas frais (le programme tournera environ 18h).",
-                    style="white")
+        warn.append(" pour avoir les quotas frais.", style="bold")
         console.print(Panel(warn, title="🕐 Verification de l'heure", border_style="yellow"))
         if not Confirm.ask("\n  Continuer quand meme maintenant ?", default=False):
             console.print("[yellow]Annule. Relance le programme apres 9h.[/yellow]")
@@ -219,7 +245,144 @@ def _interactive_pre_run() -> int | None:
         console.print(Panel(ok, title="🕐 Verification de l'heure", border_style="green"))
     console.print()
 
-    # Choix du volume d'articles par source
+
+def _show_targets(console, Table, Panel) -> None:
+    """Affiche les entreprises et mots-cles courants avec recommandations volume."""
+    targets_path = os.path.join(DATA_DIR, "targets.json")
+    if not os.path.exists(targets_path):
+        console.print("[red]✘ data/targets.json introuvable.[/red]")
+        return
+    with open(targets_path, encoding="utf-8") as f:
+        targets = json.load(f)
+    companies = targets.get("companies", [])
+    keywords = targets.get("keywords", [])
+
+    nb_q = len(companies) * len(keywords)
+    # Estimation duree GNews (~141s/req moyen + circadien 5h pour gros runs)
+    if nb_q == 0:
+        dur_est = "0 (aucune cible)"
+    elif nb_q < 50:
+        dur_est = f"~{nb_q * 0.04:.1f}h (court)"
+    elif nb_q < 150:
+        dur_est = f"~{nb_q * 0.045:.1f}h (modere)"
+    elif nb_q < 300:
+        dur_est = f"~{(nb_q * 0.05) + 5:.1f}h (long, avec pause nuit)"
+    else:
+        dur_est = f"~{(nb_q * 0.055) + 5:.1f}h (TRES long)"
+
+    # Tableau companies
+    t1 = Table(title=f"🏢  Entreprises surveillees ({len(companies)})", border_style="cyan")
+    t1.add_column("#", style="dim", justify="right")
+    t1.add_column("Nom", style="cyan")
+    for i, c in enumerate(companies, 1):
+        t1.add_row(str(i), c)
+    console.print(t1)
+
+    # Tableau keywords
+    t2 = Table(title=f"🔑  Mots-cles techniques ({len(keywords)})", border_style="cyan")
+    t2.add_column("#", style="dim", justify="right")
+    t2.add_column("Mot-cle", style="green")
+    for i, k in enumerate(keywords, 1):
+        t2.add_row(str(i), k)
+    console.print(t2)
+
+    # Recommandations
+    reco = (
+        f"  📊 [bold]Total requetes Google News[/bold] = {len(companies)} × {len(keywords)} = "
+        f"[bold cyan]{nb_q}[/bold cyan] requetes\n"
+        f"  ⏱  [bold]Duree GNews estimee[/bold] : [yellow]{dur_est}[/yellow]\n\n"
+        f"  💡 [bold]Recommandations[/bold] :\n"
+        f"     • [green]5-10 entreprises × 5-7 mots-cles[/green]    = ~25-70 req     (1-3h, pour test)\n"
+        f"     • [yellow]15 entreprises × 10 mots-cles[/yellow]        = ~150 req       (6-10h, hebdo classique)\n"
+        f"     • [cyan]21 entreprises × 14 mots-cles[/cyan] (actuel) = ~294 req       (18-22h, weekend marathon)\n"
+        f"     • [red]>30 entreprises × >15 mots-cles[/red]         = >450 req       (>30h, deconseille)"
+    )
+    console.print(Panel(reco, title="📈  Volume actuel", border_style="cyan"))
+    console.print()
+
+
+def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> None:
+    """Menu d'edition des cibles : ajouter/supprimer entreprises et mots-cles."""
+    targets_path = os.path.join(DATA_DIR, "targets.json")
+    with open(targets_path, encoding="utf-8") as f:
+        targets = json.load(f)
+
+    while True:
+        console.print(Panel(
+            "  [bold]1[/bold]  ➕  Ajouter une entreprise\n"
+            "  [bold]2[/bold]  ➖  Supprimer une entreprise\n"
+            "  [bold]3[/bold]  ➕  Ajouter un mot-cle\n"
+            "  [bold]4[/bold]  ➖  Supprimer un mot-cle\n"
+            "  [bold]5[/bold]  📋  Revoir la liste actuelle\n"
+            "  [bold]6[/bold]  ✅  Sauvegarder et continuer",
+            title="✏️  Editer les cibles",
+            border_style="yellow",
+        ))
+        action = Prompt.ask(
+            "  [bold]Que veux-tu faire ?[/bold] "
+            "[dim](tape un chiffre de 1 a 6 puis Entree)[/dim]",
+            choices=["1", "2", "3", "4", "5", "6"],
+            default="6",
+        )
+
+        if action == "1":
+            new = Prompt.ask("  Nom EXACT de l'entreprise a ajouter").strip()
+            if new and new not in targets["companies"]:
+                targets["companies"].append(new)
+                console.print(f"  [green]✓ Ajoute : {new}[/green]")
+            elif new in targets["companies"]:
+                console.print(f"  [yellow]⚠ {new} est deja dans la liste.[/yellow]")
+        elif action == "2":
+            if not targets["companies"]:
+                console.print("  [yellow]Aucune entreprise a supprimer.[/yellow]")
+                continue
+            for i, c in enumerate(targets["companies"], 1):
+                console.print(f"    {i}. {c}")
+            idx = IntPrompt.ask("  Numero de l'entreprise a supprimer (0 = annuler)", default=0)
+            if 1 <= idx <= len(targets["companies"]):
+                removed = targets["companies"].pop(idx - 1)
+                console.print(f"  [green]✓ Supprime : {removed}[/green]")
+        elif action == "3":
+            new = Prompt.ask("  Nouveau mot-cle (ex: 'plasma deposition')").strip()
+            if new and new not in targets["keywords"]:
+                targets["keywords"].append(new)
+                console.print(f"  [green]✓ Ajoute : {new}[/green]")
+            elif new in targets["keywords"]:
+                console.print(f"  [yellow]⚠ {new} est deja dans la liste.[/yellow]")
+        elif action == "4":
+            if not targets["keywords"]:
+                console.print("  [yellow]Aucun mot-cle a supprimer.[/yellow]")
+                continue
+            for i, k in enumerate(targets["keywords"], 1):
+                console.print(f"    {i}. {k}")
+            idx = IntPrompt.ask("  Numero du mot-cle a supprimer (0 = annuler)", default=0)
+            if 1 <= idx <= len(targets["keywords"]):
+                removed = targets["keywords"].pop(idx - 1)
+                console.print(f"  [green]✓ Supprime : {removed}[/green]")
+        elif action == "5":
+            _show_targets(console, Table, Panel)
+            continue
+        elif action == "6":
+            with open(targets_path, "w", encoding="utf-8") as f:
+                json.dump(targets, f, ensure_ascii=False, indent=2)
+            console.print(Panel(
+                f"[green]✅ Cibles sauvegardees dans {targets_path}[/green]\n"
+                f"   {len(targets['companies'])} entreprise(s), {len(targets['keywords'])} mot(s)-cle(s)",
+                border_style="green",
+            ))
+            console.print()
+            # Re-import live (le module config est deja charge, on patch directement)
+            try:
+                import src.config as _cfg
+                _cfg.TARGET_COMPANIES = list(targets["companies"])
+                _cfg.KEYWORDS = list(targets["keywords"])
+            except Exception:
+                pass
+            return
+
+
+def _choose_volume(console, Table, Panel, Prompt, IntPrompt) -> int:
+    """Affiche les 5 presets de volume RSS et retourne le choix utilisateur."""
     presets = [
         ("1", "🚀  Test rapide",       25,  "~5 min", "Pour valider que tout fonctionne avant un vrai run."),
         ("2", "📰  Standard hebdo",    50,  "~3-4h",  "Usage normal hebdomadaire. Suffisant si tu lances chaque semaine."),
@@ -227,43 +390,66 @@ def _interactive_pre_run() -> int | None:
         ("4", "🏆  Marathon weekend", 200,  "~18-22h", "Couverture maximale. Recommande si tu lances 1x/mois ou apres une longue pause."),
         ("5", "✏️   Personnalise",      0,  "?",      "Tu choisis le nombre toi-meme."),
     ]
-
-    table = Table(title="Combien d'articles veux-tu collecter par source RSS ?",
+    table = Table(title="📦  Combien d'articles veux-tu collecter par source RSS ?",
                   border_style="cyan", show_lines=True)
-    table.add_column("#", style="bold cyan", justify="center")
+    table.add_column("Numero", style="bold cyan", justify="center")
     table.add_column("Preset", style="bold")
     table.add_column("Articles / source", justify="right", style="green")
     table.add_column("Duree estimee", justify="center", style="yellow")
     table.add_column("Recommande pour")
-
     for choice, name, nb, dur, desc in presets:
-        nb_label = str(nb) if nb else "personnalise"
+        nb_label = str(nb) if nb else "tu choisis"
         table.add_row(choice, name, nb_label, dur, desc)
     console.print(table)
-    console.print(
-        "\n  [dim]Note : ce nombre s'applique aux flux RSS uniquement. Les autres sources "
-        "(arXiv, OpenAlex, Crossref, HAL, Tavily, Semantic Scholar, Google News) sont fixes.[/dim]\n"
-    )
 
-    chosen = Prompt.ask("  [bold]Ton choix[/bold]", choices=["1", "2", "3", "4", "5"], default="2")
+    console.print(
+        "\n  [dim]💡 Ce nombre s'applique aux flux RSS (ArXiv, MDPI, IEEE, ScienceDaily). "
+        "Les autres sources (arXiv search, OpenAlex, Crossref, HAL, Tavily, Semantic Scholar, "
+        "Google News) ont leurs volumes propres deja parametres.[/dim]\n"
+    )
+    console.print(
+        "  [bold]Tape le numero du preset que tu veux choisir[/bold] "
+        "[dim](1, 2, 3, 4 ou 5) puis Entree.[/dim]\n"
+        "  [dim]Si tu appuies juste sur Entree sans rien taper, le preset "
+        "[bold cyan]2 (Standard hebdo)[/bold cyan] est selectionne.[/dim]"
+    )
+    chosen = Prompt.ask("  [bold]Ton choix[/bold]",
+                        choices=["1", "2", "3", "4", "5"], default="2")
     if chosen == "5":
-        nb = int(Prompt.ask("  [bold]Nombre d'articles par source[/bold] (entre 5 et 1000)",
-                            default="50"))
+        nb = IntPrompt.ask(
+            "  [bold]Nombre d'articles par source[/bold] [dim](entre 5 et 1000)[/dim]",
+            default=50,
+        )
         nb = max(5, min(1000, nb))
     else:
         nb = next(p[2] for p in presets if p[0] == chosen)
-
-    console.print()
-    summary = Text()
-    summary.append("✅ Volume choisi : ", style="bold green")
-    summary.append(f"{nb}", style="bold cyan")
-    summary.append(" articles par source RSS\n", style="green")
-    summary.append("   Le programme va maintenant demarrer le pipeline complet.\n", style="dim")
-    summary.append("   Les logs detailles defilent ci-dessous. Les fichiers logs sont aussi sauves dans logs/veille.log",
-                   style="dim")
-    console.print(Panel(summary, title="🎬 Lancement", border_style="green"))
-    console.print()
+        preset_name = next(p[1] for p in presets if p[0] == chosen)
+        console.print(f"\n  [green]✓ Selectionne : {preset_name} ({nb} articles/source)[/green]\n")
     return nb
+
+
+def _show_recap_and_confirm(console, Panel, Confirm, nb_articles: int) -> bool:
+    """Affiche un recap final et demande confirmation. Retourne True pour lancer."""
+    targets_path = os.path.join(DATA_DIR, "targets.json")
+    with open(targets_path, encoding="utf-8") as f:
+        targets = json.load(f)
+    nb_q = len(targets.get("companies", [])) * len(targets.get("keywords", []))
+
+    summary = (
+        f"  [bold]🏢  Entreprises surveillees :[/bold] {len(targets.get('companies', []))}\n"
+        f"  [bold]🔑  Mots-cles techniques :[/bold] {len(targets.get('keywords', []))}\n"
+        f"  [bold]📦  Articles par source RSS :[/bold] [cyan]{nb_articles}[/cyan]\n"
+        f"  [bold]🔍  Requetes Google News :[/bold] [cyan]{nb_q}[/cyan]\n"
+        f"\n  [dim]Si tout est correct, le programme va demarrer le pipeline complet "
+        f"(RSS + arXiv + OpenAlex + Crossref + HAL + Semantic Scholar + Tavily + Google News + IA + email).[/dim]"
+    )
+    console.print(Panel(summary, title="📋  Recapitulatif final",
+                        border_style="green", padding=(1, 2)))
+    return Confirm.ask(
+        "\n  [bold]✅ Tout est correct ? Lancer le pipeline maintenant ?[/bold] "
+        "[dim](Non = retour au menu pour corriger)[/dim]",
+        default=True,
+    )
 
 
 def main() -> None:

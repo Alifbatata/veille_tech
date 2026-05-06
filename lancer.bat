@@ -1,6 +1,6 @@
 @echo off
 REM ============================================================================
-REM Veille Tech — script de lancement pour Windows
+REM Veille Tech - script de lancement pour Windows
 REM Double-clique sur ce fichier ou lance-le depuis l'Explorateur.
 REM
 REM Ce script :
@@ -11,15 +11,14 @@ REM   4. Lance configurer.py si .env n'existe pas (assistant de config)
 REM   5. Demarre main.py (pipeline complet)
 REM ============================================================================
 setlocal enabledelayedexpansion
-chcp 65001 >nul
 set PYTHONIOENCODING=utf-8
 
 cd /d "%~dp0"
-title Veille Tech — Lancement
+title Veille Tech - Lancement
 
 echo.
 echo ===============================================================
-echo   VEILLE TECHNOLOGIQUE — Lanceur Windows
+echo   VEILLE TECHNOLOGIQUE - Lanceur Windows
 echo ===============================================================
 echo.
 
@@ -94,7 +93,7 @@ if not exist ".env" (
     if errorlevel 1 (
         echo.
         echo [!] La configuration .env est incomplete.
-        choice /c OY /n /m "Veux-tu lancer l'assistant de configuration maintenant (O/N) ? "
+        choice /c ON /n /m "Veux-tu lancer l'assistant de configuration maintenant (O/N) ? "
         if errorlevel 2 (
             echo Annule.
             pause
