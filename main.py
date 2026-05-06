@@ -191,26 +191,31 @@ def _interactive_pre_run() -> int | None:
     # Guide de navigation TOUJOURS visible
     nav = (
         "  [bold yellow]📖  GUIDE DE NAVIGATION — lis-moi avant de continuer[/bold yellow]\n\n"
-        "  • A chaque etape, tu tapes le [bold cyan]NUMERO[/bold cyan] de ton choix puis [bold]Entree[/bold].\n"
-        "  • Le chiffre [bold cyan](n)[/bold cyan] entre parentheses dans le prompt = "
-        "valeur par defaut si tu appuies juste sur Entree sans rien taper.\n"
+        "  • Quand tu vois un [bold]TABLEAU NUMEROTE[/bold], tu tapes le [bold cyan]numero[/bold cyan] "
+        "de ton choix puis tu appuies sur [bold]Entree[/bold].\n\n"
+        "  • Quand tu vois une [bold]QUESTION oui/non[/bold] (style [yellow]\"Continuer ?\"[/yellow]), "
+        "tu tapes :\n"
+        "      [bold green]y[/bold green]  pour [bold]oui[/bold]   "
+        "[dim](attention : c'est la lettre [bold]y[/bold] anglaise comme \"yes\", pas \"o\")[/dim]\n"
+        "      [bold red]n[/bold red]  pour [bold]non[/bold]\n\n"
+        "  • Quand tu vois [bold cyan](valeur)[/bold cyan] entre parentheses, c'est la "
+        "[bold]valeur par defaut[/bold] si tu appuies juste sur [bold]Entree[/bold] sans rien taper.\n\n"
         "  • [bold magenta]Pour revenir a l'etape precedente[/bold magenta] : tape "
-        "[bold]r[/bold] (ou [bold]p[/bold]) quand le programme te le permet.\n"
-        "  • Au [bold]recap final[/bold], si tu reponds [bold]Non[/bold] tu reboucles "
-        "sur tout depuis le debut (cibles puis volume puis recap).\n"
-        "  • Pour [bold]annuler completement[/bold] et fermer le programme : "
-        "appuie sur [bold]Ctrl+C[/bold] a tout moment."
+        "[bold]r[/bold] quand le programme te le permet (mention explicite a chaque etape concernee).\n\n"
+        "  • [bold]Au recap final[/bold], si tu reponds [bold red]n (non)[/bold red], tu reboucles "
+        "sur tout depuis le debut (cibles, volume, recap).\n\n"
+        "  • Pour [bold]annuler completement[/bold] et fermer le programme a tout moment : "
+        "appuie sur [bold red]Ctrl+C[/bold red] (touche Ctrl maintenue + lettre C)."
     )
     console.print(Panel(nav, border_style="magenta", padding=(1, 1)))
-    console.print()
-    _press_enter_to_continue(console, "Lis bien les instructions ci-dessus, puis")
+    _press_enter_to_continue(console, "Lis bien le guide ci-dessus avant de continuer.")
 
     # ----- ETAPE 1 : Verification heure -----
     console.print("\n[bold blue]══════════════════════════════════════════════════════════════[/bold blue]")
     console.print("[bold blue]  Etape 1/3 : verification de l'heure                         [/bold blue]")
     console.print("[bold blue]══════════════════════════════════════════════════════════════[/bold blue]\n")
     _check_hour_warning(console, Confirm, Panel, Text)
-    _press_enter_to_continue(console, "Heure verifiee. Appuie sur Entree pour passer a l'etape 2 (cibles)")
+    _press_enter_to_continue(console, "Etape 1 terminee. La prochaine etape affichera la liste de tes cibles.")
 
     # ----- ETAPES 2 (cibles) + 3 (volume) + recap, avec boucle de retour -----
     while True:
@@ -219,11 +224,14 @@ def _interactive_pre_run() -> int | None:
         console.print("[bold blue]  Etape 2/3 : cibles (entreprises + mots-cles)                [/bold blue]")
         console.print("[bold blue]══════════════════════════════════════════════════════════════[/bold blue]\n")
         _show_targets(console, Table, Panel)
-        _press_enter_to_continue(console, "Prends le temps de lire les cibles. Appuie sur Entree pour la suite")
+        _press_enter_to_continue(console, "Prends le temps de lire les cibles ci-dessus.")
 
         edit_msg = (
-            "  [bold]Veux-tu modifier ces cibles avant de lancer ?[/bold] "
-            "[dim](o = ouvrir le menu d'edition, n = passer a l'etape suivante)[/dim]"
+            "  [bold]Veux-tu modifier ces cibles avant de lancer le pipeline ?[/bold]\n"
+            "  [dim]Tape [bold]y[/bold] (yes = oui) pour ouvrir le menu d'edition, "
+            "ou [bold]n[/bold] (non) pour passer directement a l'etape 3.\n"
+            "  Si tu appuies juste sur [bold]Entree[/bold] sans rien taper, ce sera "
+            "[bold]n (non)[/bold] par defaut.[/dim]"
         )
         if Confirm.ask(edit_msg, default=False):
             _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm)
@@ -244,19 +252,30 @@ def _interactive_pre_run() -> int | None:
         console.print("[yellow]↩ Retour a l'etape 2 (cibles) pour modifier ta config…[/yellow]\n")
 
 
-def _press_enter_to_continue(console, message: str = "Appuie sur Entree pour continuer") -> None:
+def _press_enter_to_continue(console, intro: str = "") -> None:
     """Pause stylisee : attend que l'utilisateur appuie sur Entree pour avancer.
 
-    Permet de ne pas faire defiler trop vite les ecrans denses et donner le temps
-    a un novice de lire chaque section avant de passer a la suivante.
+    Le prompt final est INVARIABLE et parfaitement explicite ("Appuie sur la
+    touche ENTREE pour continuer") pour qu'aucun novice ne se demande s'il
+    faut taper quelque chose ou juste appuyer sur Entree.
+
+    Args:
+        intro : phrase optionnelle affichee en gris au-dessus du prompt
+                (contexte type "L'etape 1 est terminee").
     """
     try:
         from rich.prompt import Prompt
-        Prompt.ask(f"[dim]  ⏎  {message}[/dim]", default="", show_default=False)
+        if intro:
+            console.print(f"\n  [dim]{intro}[/dim]")
+        Prompt.ask(
+            "  [bold yellow]👉  Appuie sur la touche ENTREE pour continuer[/bold yellow]",
+            default="", show_default=False,
+        )
     except (ImportError, EOFError, KeyboardInterrupt):
-        # Mode degrade : input() classique
         try:
-            input(f"  ⏎  {message}... ")
+            if intro:
+                print(f"\n  {intro}")
+            input("  >>> Appuie sur la touche ENTREE pour continuer... ")
         except (EOFError, KeyboardInterrupt):
             pass
 
@@ -279,8 +298,15 @@ def _check_hour_warning(console, Confirm, Panel, Text) -> None:
         warn.append("9h00", style="bold green")
         warn.append(" pour avoir les quotas frais.", style="bold")
         console.print(Panel(warn, title="🕐 Verification de l'heure", border_style="yellow"))
-        if not Confirm.ask("\n  Continuer quand meme maintenant ?", default=False):
-            console.print("[yellow]Annule. Relance le programme apres 9h.[/yellow]")
+        if not Confirm.ask(
+            "\n  [bold]Veux-tu continuer quand meme maintenant ?[/bold]\n"
+            "  [dim]Tape [bold]y[/bold] (yes = oui, lancer maintenant), "
+            "ou [bold]n[/bold] (non, je relancerai apres 9h).\n"
+            "  Si tu appuies juste sur [bold]Entree[/bold] sans rien taper, ce sera "
+            "[bold]n (non)[/bold] par defaut.[/dim]",
+            default=False,
+        ):
+            console.print("[yellow]Annule. Relance le programme apres 9h pour avoir des quotas frais.[/yellow]")
             sys.exit(0)
     else:
         ok = Text()
@@ -491,8 +517,11 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
             modified_keywords  = targets["keywords"]  != targets_disk.get("keywords", [])
             if modified_companies or modified_keywords:
                 if not Confirm.ask(
-                    "\n  [yellow]Tu as fait des modifications non sauvegardees. "
-                    "Vraiment annuler et tout perdre ?[/yellow]",
+                    "\n  [yellow]Tu as fait des modifications NON sauvegardees. "
+                    "Vraiment tout annuler et tout perdre ?[/yellow]\n"
+                    "  [dim]Tape [bold]y[/bold] (yes = oui, perdre les modifs), "
+                    "ou [bold]n[/bold] (non, retourner au menu pour les sauvegarder).\n"
+                    "  Entree seul = [bold]n (non)[/bold] par defaut.[/dim]",
                     default=False,
                 ):
                     continue
@@ -574,8 +603,11 @@ def _show_recap_and_confirm(console, Panel, Confirm, nb_articles: int) -> bool:
     console.print(Panel(summary, title="📋  Recapitulatif final",
                         border_style="green", padding=(1, 2)))
     return Confirm.ask(
-        "\n  [bold]✅ Tout est correct ? Lancer le pipeline maintenant ?[/bold] "
-        "[dim](Non = retour au menu pour corriger)[/dim]",
+        "\n  [bold]✅ Tout est correct ? Lancer le pipeline maintenant ?[/bold]\n"
+        "  [dim]Tape [bold]y[/bold] (yes = oui, demarrer le pipeline), "
+        "ou [bold]n[/bold] (non, retourner au menu pour corriger).\n"
+        "  Si tu appuies juste sur [bold]Entree[/bold] sans rien taper, ce sera "
+        "[bold]y (oui)[/bold] par defaut (lancement immediat).[/dim]",
         default=True,
     )
 
