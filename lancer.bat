@@ -88,18 +88,32 @@ if not exist ".env" (
         exit /b 1
     )
 ) else (
-    REM Verifier que les cles obligatoires sont presentes
+    REM Afficher l'etat actuel de la config et proposer de la modifier
     python configurer.py --check
     if errorlevel 1 (
         echo.
         echo [!] La configuration .env est incomplete.
-        choice /c ON /n /m "Veux-tu lancer l'assistant de configuration maintenant (O/N) ? "
-        if errorlevel 2 (
-            echo Annule.
+        echo Lancement automatique de l'assistant de configuration...
+        echo.
+        python configurer.py
+        if errorlevel 1 (
+            echo [X] Configuration annulee.
             pause
             exit /b 1
         )
+    ) else (
+        echo.
+        echo ===============================================================
+        echo   Veux-tu modifier ta configuration avant de lancer ?
+        echo ===============================================================
+        echo.
+        echo   [C] Modifier mes cles API et emails (assistant pas-a-pas)
+        echo   [L] Lancer le pipeline directement avec la config actuelle
+        echo.
+        choice /c CL /n /m "Ton choix (C ou L) : "
+        if errorlevel 2 goto skip_config
         python configurer.py
+        :skip_config
     )
 )
 

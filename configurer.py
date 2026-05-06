@@ -396,9 +396,19 @@ def _summary_table(values: dict[str, str]) -> None:
                 masked = "•" * 8 + v[-4:]
             else:
                 masked = v
-        else:
-            statut = "⚪ vide" if not f.required else "[red]✘ MANQUE[/red]"
+        elif f.required:
+            statut = "[red]✘ MANQUE[/red]"
             masked = ""
+        else:
+            # Champ optionnel non renseigne : on affiche la valeur par defaut
+            # (codee en dur dans le code Python) plutot que "vide", pour que
+            # l'utilisateur sache QUELLE valeur sera reellement utilisee.
+            if f.default:
+                statut = "[dim]⚙ defaut[/dim]"
+                masked = f"[dim](valeur par defaut : {f.default})[/dim]"
+            else:
+                statut = "[dim]⚪ vide (skip)[/dim]"
+                masked = "[dim]source desactivee[/dim]"
         table.add_row(f.label, statut, masked)
     console.print(table)
 
