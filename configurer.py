@@ -233,11 +233,24 @@ FIELDS: list[Field] = [
         label="📦 Taille des batchs envoyes a l'IA",
         description=(
             "Nombre d'articles que l'IA analyse en un seul appel.\n"
-            "Plus c'est grand, moins d'appels = moins de quota consomme.\n"
-            "Mais trop grand : risque de tronquer la reponse."
+            "Influence le nombre total de requetes API consommees par run.\n"
+            "Exemple : 200 articles + batch=20 -> 10 requetes ; batch=10 -> 20 requetes.\n\n"
+            "  - PETIT (5-10)  : plus de requetes, mais reponses tres fiables\n"
+            "                    (utile si tu vois 'JSON tronque' dans les logs)\n"
+            "  - MOYEN (15-25) : equilibre - recommande pour la plupart des cas\n"
+            "  - GRAND (30-50) : moins de requetes, economise le quota gratuit\n"
+            "                    (mais risque de tronquer la reponse JSON)\n\n"
+            "Le defaut [20] est calibre pour Gemini 2.5 Flash (8192 tokens output)\n"
+            "et fonctionne avec tous les modeles de la cascade dynamique."
         ),
         default="20",
-        instructions="Recommande : 20 (compromis quota / fiabilite)",
+        instructions=(
+            "99 % du temps tu peux laisser le defaut (20).\n"
+            "Ne change que si :\n"
+            "  - Tu vois souvent 'JSON tronque' dans les logs   -> baisse a 10\n"
+            "  - Ton quota Gemini gratuit est tres tendu        -> monte a 30-40\n"
+            "  - Tu veux tester un modele a petit contexte      -> baisse a 5-10"
+        ),
         required=False,
         validator=_validate_int_range(5, 50),
     ),
@@ -318,72 +331,110 @@ def _ask_field(
     `staged_value`   = valeur deja saisie pendant cette session (None si jamais visite).
     """
     has_staged = staged_value is not None
-    effective_value = staged_value if has_staged else (existing_value or "")
-    has_value = has_staged or bool(existing_value)
+    has_existing = bool(existing_value)
+    has_default = bool(field.default)
+
+    # Valeur "effective" qui serait conservee si l'utilisateur tape 'g'.
+    if has_staged:
+        effective_value = staged_value
+        effective_source = "staged"
+    elif has_existing:
+        effective_value = existing_value
+        effective_source = "existing"
+    elif has_default:
+        effective_value = field.default
+        effective_source = "default"
+    else:
+        effective_value = ""
+        effective_source = "none"
 
     while True:
         _print_field_card(field, existing_value, staged_value)
 
-        if has_value:
-            actions = ["g", "m", "v"]
-            label_parts = [
-                "[bold]g[/bold]arder",
-                "[bold]m[/bold]odifier",
-                "[bold]v[/bold]oir en clair",
-            ]
-            staged_differs = has_staged and staged_value != (existing_value or "")
-            if staged_differs and existing_value:
-                actions.append("r")
-                label_parts.append("[bold]r[/bold]estaurer la valeur .env")
-            if can_go_back:
-                actions.append("p")
-                label_parts.append("[bold]p[/bold]recedent")
+        actions: list[str] = []
+        label_parts: list[str] = []
 
-            console.print("  " + " • ".join(label_parts))
-            choice = Prompt.ask(
-                "  [bold]Que veux-tu faire ?[/bold]",
-                choices=actions,
-                default="g",
-                show_choices=False,
-            )
-            console.print()
-
-            if choice == "g":
-                return effective_value
-            if choice == "v":
-                console.print(f"  Valeur en clair : [bold]{effective_value}[/bold]\n")
-                continue
-            if choice == "r":
-                restored = existing_value or ""
-                console.print(
-                    f"  [yellow]↺ Restauration de la valeur .env : "
-                    f"[bold]{_mask_value(field, restored)}[/bold][/yellow]\n"
-                )
-                return restored
-            if choice == "p":
-                return _GO_BACK
+        # 'g' (garder) si on a une valeur a proposer (staged / existing / default)
+        if effective_source != "none":
+            actions.append("g")
+            if effective_source == "default":
+                label_parts.append("[bold]g[/bold]arder le defaut suggere")
+            else:
+                label_parts.append("[bold]g[/bold]arder cette valeur")
+            actions.append("m")
+            label_parts.append("[bold]m[/bold]odifier")
+            actions.append("v")
+            label_parts.append("[bold]v[/bold]oir en clair")
         else:
-            if can_go_back:
+            actions.append("s")
+            label_parts.append("[bold]s[/bold]aisir une valeur")
+
+        # 'r' (restaurer) uniquement si la staged differe d'une existing reelle
+        staged_differs = has_staged and staged_value != (existing_value or "")
+        if staged_differs and has_existing:
+            actions.append("r")
+            label_parts.append("[bold]r[/bold]estaurer la valeur .env")
+
+        # 'i' (ignorer) uniquement pour champ optionnel
+        if not field.required:
+            actions.append("i")
+            label_parts.append("[bold]i[/bold]gnorer (laisser vide)")
+
+        if can_go_back:
+            actions.append("p")
+            label_parts.append("[bold]p[/bold]recedent")
+
+        default_choice = "g" if effective_source != "none" else "s"
+        default_label = {
+            "g": "garder",
+            "s": "saisir maintenant",
+        }[default_choice]
+
+        console.print("  " + " • ".join(label_parts))
+        choice = Prompt.ask(
+            f"  [bold]Que veux-tu faire ?[/bold] "
+            f"[dim](Entree = [bold]{default_choice}[/bold] {default_label})[/dim]",
+            choices=actions,
+            default=default_choice,
+            show_choices=False,
+            show_default=False,
+        )
+        console.print()
+
+        if choice == "g":
+            if effective_source == "default":
                 console.print(
-                    "  [dim]Tape [bold]p[/bold] pour revenir au champ precedent, "
-                    "ou laisse vide pour saisir maintenant.[/dim]"
+                    f"  [bright_green]✓ Defaut accepte : "
+                    f"[bold]{effective_value}[/bold][/bright_green]\n"
                 )
-                first = Prompt.ask(
-                    "  [bold]Action[/bold]",
-                    choices=["s", "p"],
-                    default="s",
-                    show_choices=False,
-                )
-                if first == "p":
-                    return _GO_BACK
+            return effective_value
+        if choice == "v":
+            console.print(f"  Valeur en clair : [bold]{effective_value}[/bold]\n")
+            continue
+        if choice == "r":
+            restored = existing_value or ""
+            console.print(
+                f"  [yellow]↺ Restauration de la valeur .env : "
+                f"[bold]{_mask_value(field, restored)}[/bold][/yellow]\n"
+            )
+            return restored
+        if choice == "i":
+            console.print(
+                "  [bright_green]✓ Champ ignore (laisse vide pour cette session).[/bright_green]\n"
+            )
+            return ""
+        if choice == "p":
+            return _GO_BACK
+        # choice == "m" ou "s" -> on tombe dans la saisie
 
         prompt_text = "  [bold]Saisis la valeur[/bold]"
         if not field.required:
-            prompt_text += " [dim](laisse vide et appuie Entree pour passer)[/dim]"
-        if field.default and not has_value:
-            value = Prompt.ask(prompt_text, default=field.default, password=field.secret)
-        else:
-            value = Prompt.ask(prompt_text, default="", password=field.secret)
+            prompt_text += " [dim](laisse vide pour ignorer)[/dim]"
+        # Pre-remplir avec le defaut UNIQUEMENT si rien n'existe encore
+        # (on ne veut pas pre-remplir si l'utilisateur tape 'm' apres avoir vu
+        # son ancienne valeur - il veut taper depuis zero)
+        prefill = field.default if (has_default and not has_staged and not has_existing) else ""
+        value = Prompt.ask(prompt_text, default=prefill, password=field.secret)
 
         value = value.strip()
         if not value and not field.required:
@@ -419,10 +470,14 @@ def _ask_field(
 def _legend_actions() -> None:
     console.print(
         "  [dim]💡 A chaque etape tu pourras taper :\n"
-        "     [bold]g[/bold] = garder la valeur actuelle  •  "
-        "[bold]m[/bold] = modifier  •  [bold]v[/bold] = voir en clair\n"
-        "     [bold]r[/bold] = restaurer la valeur .env d'origine (si tu as deja modifie)  •  "
-        "[bold]p[/bold] = revenir au champ precedent[/dim]\n"
+        "     [bold]g[/bold] = garder la valeur proposee   •  "
+        "[bold]s[/bold] = saisir une valeur (si aucune proposee)\n"
+        "     [bold]m[/bold] = modifier la valeur          •  "
+        "[bold]v[/bold] = voir en clair\n"
+        "     [bold]i[/bold] = ignorer ce champ (optionnel)•  "
+        "[bold]r[/bold] = restaurer la valeur .env d'origine\n"
+        "     [bold]p[/bold] = revenir au champ precedent\n"
+        "     (Appuie juste sur Entree pour accepter l'action par defaut surlignee)[/dim]\n"
     )
 
 
