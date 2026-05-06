@@ -63,6 +63,8 @@ Thumbs.db
 # Tests / outputs ponctuels
 # =============================================================================
 _test_*.py
+_commit_msg.txt
+_*.txt
 diagnose.py
 bootstrap.py
 *.tmp
