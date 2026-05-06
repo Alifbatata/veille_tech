@@ -112,6 +112,19 @@ FALLBACK_CHAIN: list[str] = list(_STATIC_FALLBACK_CHAIN)
 # Alias historique pour la compat — utilisé par d'éventuels imports externes.
 FALLBACK_MODEL: str = FALLBACK_CHAIN[0] if FALLBACK_CHAIN else "gemini-2.5-flash-lite"
 
+# Modèles « premium » à tenter EN PRIORITÉ pour le résumé exécutif final
+# (un seul appel, haute valeur). Quotas free restreints (50-100/jour) mais
+# qualité maximale. Si tous indisponibles, on retombe sur le modèle standard
+# de la cascade. Ordre d'essai descendant : meilleur d'abord.
+_PREMIUM_SUMMARY_MODELS: list[str] = [
+    "gemini-3-pro-preview",
+    "gemini-3.1-pro-preview",
+    "gemini-2.5-pro",
+    "gemini-pro-latest",
+    "gemini-3-flash-preview",
+    "gemini-2.5-flash",  # finit par retomber sur le standard
+]
+
 _DEFAULT_QUOTA_PAUSE: float = 60.0
 _QUOTA_RETRY_MARGIN: float = 2.0
 
@@ -245,14 +258,26 @@ def _normalize_model_id(name: str) -> str:
     return name.split("/")[-1] if "/" in name else name
 
 
+# Mots-clés indiquant un modèle SPÉCIALISÉ inutilisable pour le scoring/résumé
+# (génération image, TTS, robotique, deep research, computer-use, etc.).
+# Présents dans list_models() mais hors-périmètre de notre pipeline de filtrage.
+_SPECIALIZED_MODEL_KEYWORDS: tuple[str, ...] = (
+    "image", "tts", "robotics", "lyria", "deep-research",
+    "computer-use", "customtools", "nano-banana", "vision-only",
+)
+
+
 def _discover_available_models() -> list[str]:
     """Découvre dynamiquement les modèles Gemini accessibles à la clé API.
 
     Appelle genai.list_models() pour énumérer toutes les ressources visibles
-    par la clé courante. Filtre celles qui exposent generateContent puis trie
-    selon _MODEL_PREFERENCE (ordre projet) — les modèles inconnus reçoivent
-    un poids générique élevé (passent en queue, mais sont essayés malgré tout
-    si toute la chaîne préférée échoue).
+    par la clé courante. Filtre :
+      - celles qui n'exposent PAS generateContent (modèles embedding pur, etc.)
+      - celles dont le nom contient un mot-clé spécialisé (image, tts, robotics…)
+        — ces modèles sont accessibles mais hors-périmètre pour notre pipeline
+        de scoring textuel + résumé.
+    Trie selon _MODEL_PREFERENCE (ordre projet) — les modèles inconnus reçoivent
+    un poids générique élevé (passent en queue).
 
     En cas d'erreur réseau ou de réponse vide, on retombe silencieusement sur
     _STATIC_FALLBACK_CHAIN — le pipeline n'est jamais bloqué par une décou-
@@ -273,14 +298,27 @@ def _discover_available_models() -> list[str]:
         return list(_STATIC_FALLBACK_CHAIN)
 
     discovered: list[str] = []
+    skipped_specialized: list[str] = []
     for m in models_iter:
         # Ne retient que les modèles qui supportent l'inférence texte
         methods = getattr(m, "supported_generation_methods", None) or []
         if "generateContent" not in methods:
             continue
         name = _normalize_model_id(getattr(m, "name", ""))
-        if name:
-            discovered.append(name)
+        if not name:
+            continue
+        # Exclut les modèles spécialisés (image, tts, robotics, etc.)
+        name_lower = name.lower()
+        if any(kw in name_lower for kw in _SPECIALIZED_MODEL_KEYWORDS):
+            skipped_specialized.append(name)
+            continue
+        discovered.append(name)
+
+    if skipped_specialized:
+        logger.debug(
+            "⏭️  %d modèle(s) spécialisé(s) exclu(s) de la cascade : %s",
+            len(skipped_specialized), skipped_specialized[:5],
+        )
 
     if not discovered:
         logger.warning(
@@ -761,6 +799,13 @@ def _generate_executive_summary(
     complète de la sélection finale et produit un résumé cohérent des
     tendances majeures de la semaine.
 
+    OPTIMISATION QUALITÉ : le résumé exécutif est UN SEUL appel mais c'est
+    le plus visible du digest. Plutôt que d'utiliser le modèle qui termine
+    la cascade (souvent un Gemma dégradé après plusieurs basculements de
+    quota), on tente d'abord le meilleur modèle "Pro" disponible — quitte
+    à basculer dans la cascade en cas de quota épuisé. Voir
+    _PREMIUM_SUMMARY_MODELS pour l'ordre d'essai.
+
     Args:
         model:            instance du modèle Gemini déjà initialisée.
         retained_articles: liste finale des articles retenus (après scoring et tri).
@@ -799,17 +844,61 @@ def _generate_executive_summary(
         f"Articles à synthétiser :\n\n{items_text}"
     )
 
+    # Tentative en cascade premium : on essaie d'abord les Pro (quotas free
+    # restreints mais qualité maximale), puis Flash, puis on tombe sur le
+    # modèle actif standard. Chaque échec (404/403/quota) bascule au suivant
+    # SANS toucher à _active_model_name (on ne veut pas casser la cascade
+    # principale du scoring si on revenait scorer un nouveau batch).
+    saved_active_name = _active_model_name
+    saved_active_model = _active_model
+    raw: str | None = None
+    last_error: str = ""
     try:
-        logger.info("📝 Génération du résumé exécutif global (%d articles)…", len(top_articles))
-        raw = _call_gemini_with_retry(
-            model, summary_prompt, max_retries=2, prefix_system_prompt=False,
-        )
-        summary = _sanitize_executive_summary(raw)
-        logger.info("✅ Résumé exécutif généré (%d caractères)", len(summary))
-        return summary
-    except GeminiUnavailableError as exc:
-        logger.warning("⚠️  Impossible de générer le résumé exécutif final : %s", exc)
-        return ""
+        for premium in _PREMIUM_SUMMARY_MODELS:
+            try:
+                premium_model = _build_model(premium)
+            except (google_exceptions.NotFound, google_exceptions.PermissionDenied) as exc:
+                last_error = f"{premium}: not_available ({exc})"
+                continue
+
+            # Bascule temporaire — _call_gemini_with_retry lit _active_model_name
+            # pour décider si Gemma ou Gemini, etc.
+            globals()["_active_model"] = premium_model
+            globals()["_active_model_name"] = premium
+
+            try:
+                logger.info("📝 Résumé exécutif : tentative avec %s (premium)…", premium)
+                raw = _call_gemini_with_retry(
+                    premium_model, summary_prompt, max_retries=1,
+                    prefix_system_prompt=False,
+                )
+                logger.info("✅ Résumé exécutif généré par %s", premium)
+                break
+            except GeminiUnavailableError as exc:
+                last_error = f"{premium}: {exc}"
+                logger.info("   └─ %s indisponible, essai du suivant", premium)
+                continue
+    finally:
+        # Restaure le modèle actif standard pour ne pas perturber un éventuel
+        # appel futur (et pour que _meta.model reflète bien le modèle scoring).
+        globals()["_active_model"] = saved_active_model
+        globals()["_active_model_name"] = saved_active_name
+
+    if raw is None:
+        # Aucun premium n'a marché — fallback ultime : modèle actif standard
+        try:
+            logger.info("📝 Résumé exécutif : fallback sur modèle standard %s", saved_active_name)
+            raw = _call_gemini_with_retry(
+                model, summary_prompt, max_retries=2, prefix_system_prompt=False,
+            )
+        except GeminiUnavailableError as exc:
+            logger.warning("⚠️  Impossible de générer le résumé exécutif (premium et fallback): %s — %s",
+                           last_error, exc)
+            return ""
+
+    summary = _sanitize_executive_summary(raw)
+    logger.info("✅ Résumé exécutif généré (%d caractères)", len(summary))
+    return summary
 
 
 def _sanitize_executive_summary(raw: str) -> str:
