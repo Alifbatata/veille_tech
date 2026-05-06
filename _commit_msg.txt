@@ -1,0 +1,36 @@
+UX edition cibles : feedback visuel direct + retour arriere explicite
+
+Bugs corriges :
+
+1. Apres un ajout/suppression dans le menu d'edition cibles, l'option
+   "Revoir la liste actuelle" affichait la version SUR DISQUE, donc les
+   modifs in-memory non encore sauvegardees etaient invisibles. L'utili-
+   sateur ne pouvait pas verifier l'orthographe d'une entree qu'il venait
+   d'ajouter avant de sauvegarder.
+
+   Fix : _show_targets accepte maintenant un parametre targets_dict
+   optionnel. Si fourni, affiche la liste in-memory avec un suffixe
+   "(non encore sauvegarde)" en jaune. Le menu d'edition passe sa copie
+   de travail a chaque action 5.
+
+2. Apres chaque ajout/suppression individuel, le programme affiche
+   maintenant automatiquement la liste a jour via _print_mini_list().
+   L'utilisateur voit immediatement si son ajout est bien orthographie
+   et peut le supprimer puis le reajouter sans avoir a sauvegarder.
+
+3. Le retour en arriere n'etait pas explicite. Ajout :
+   - Panneau "GUIDE DE NAVIGATION" en haut du pre-run, toujours visible,
+     qui explique r/p pour revenir, Entree pour defaut, Ctrl+C pour
+     annuler completement.
+   - Markers d'etape colores : "── Etape 1/3 : verification heure ──",
+     "── Etape 2/3 : cibles ──", "── Etape 3/3 : volume ──".
+   - Au choix volume, les touches "r" et "p" sont acceptees pour revenir
+     a l'edition cibles. _choose_volume retourne None dans ce cas et la
+     boucle externe redirige vers l'etape 2.
+   - Au menu d'edition, nouvelle option 7 "Quitter sans sauvegarder"
+     qui annule toutes les modifs in-memory (avec confirmation si des
+     modifs existent).
+
+4. Le panneau apres "Sauvegarder et continuer" mentionne maintenant
+   explicitement que les modifications sont permanentes pour les
+   prochains lancements.

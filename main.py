@@ -187,33 +187,52 @@ def _interactive_pre_run() -> int | None:
                  style="dim cyan")
     console.print(Panel(Align.center(title), border_style="cyan", padding=(1, 2)))
     console.print()
-    console.print(
-        "  [dim]💡 Astuce : a chaque etape, tu peux taper le NUMERO de ton choix dans le tableau "
-        "qui s'affiche ci-dessous. Le chiffre [bold cyan]entre parentheses (n)[/bold cyan] "
-        "est la valeur par defaut si tu appuies juste sur la touche Entree sans rien taper.[/dim]\n"
-    )
 
-    # ----- 1. Verification heure -----
+    # Guide de navigation TOUJOURS visible
+    nav = (
+        "  [bold yellow]📖  GUIDE DE NAVIGATION — lis-moi avant de continuer[/bold yellow]\n\n"
+        "  • A chaque etape, tu tapes le [bold cyan]NUMERO[/bold cyan] de ton choix puis [bold]Entree[/bold].\n"
+        "  • Le chiffre [bold cyan](n)[/bold cyan] entre parentheses dans le prompt = "
+        "valeur par defaut si tu appuies juste sur Entree sans rien taper.\n"
+        "  • [bold magenta]Pour revenir a l'etape precedente[/bold magenta] : tape "
+        "[bold]r[/bold] (ou [bold]p[/bold]) quand le programme te le permet.\n"
+        "  • Au [bold]recap final[/bold], si tu reponds [bold]Non[/bold] tu rebouchles "
+        "sur tout depuis le debut (cibles puis volume puis recap).\n"
+        "  • Pour [bold]annuler completement[/bold] et fermer le programme : "
+        "appuie sur [bold]Ctrl+C[/bold] a tout moment."
+    )
+    console.print(Panel(nav, border_style="magenta", padding=(1, 1)))
+    console.print()
+
+    # ----- ETAPE 1 : Verification heure -----
+    console.print("[bold blue]── Etape 1/3 : verification de l'heure ──[/bold blue]")
     _check_hour_warning(console, Confirm, Panel, Text)
 
-    # ----- 2. Affichage / edition cibles + 3. choix volume + 4. recap, en boucle -----
+    # ----- ETAPES 2 (cibles) + 3 (volume) + recap, avec boucle de retour -----
     while True:
+        # ----- ETAPE 2 : cibles -----
+        console.print("[bold blue]── Etape 2/3 : cibles (entreprises + mots-cles) ──[/bold blue]")
         _show_targets(console, Table, Panel)
 
-        # Demande si on veut editer les cibles
         edit_msg = (
             "  [bold]Veux-tu modifier ces cibles avant de lancer ?[/bold] "
-            "[dim](o = oui, n = non/continuer)[/dim]"
+            "[dim](o = ouvrir le menu d'edition, n = passer a l'etape suivante)[/dim]"
         )
         if Confirm.ask(edit_msg, default=False):
             _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm)
 
+        # ----- ETAPE 3 : volume + retour eventuel -----
+        console.print("\n[bold blue]── Etape 3/3 : volume d'articles par source ──[/bold blue]")
         nb = _choose_volume(console, Table, Panel, Prompt, IntPrompt)
+        if nb is None:
+            # L'utilisateur a tape "r" pour revenir aux cibles
+            console.print("[yellow]↩ Retour a l'etape 2 (cibles)…[/yellow]\n")
+            continue
 
         # ----- Recap final + confirmation -----
         if _show_recap_and_confirm(console, Panel, Confirm, nb):
             return nb
-        # Sinon on reboucle : retour au choix des cibles
+        console.print("[yellow]↩ Retour a l'etape 2 (cibles) pour modifier ta config…[/yellow]\n")
 
 
 def _check_hour_warning(console, Confirm, Panel, Text) -> None:
@@ -246,14 +265,25 @@ def _check_hour_warning(console, Confirm, Panel, Text) -> None:
     console.print()
 
 
-def _show_targets(console, Table, Panel) -> None:
-    """Affiche les entreprises et mots-cles courants avec recommandations volume."""
-    targets_path = os.path.join(DATA_DIR, "targets.json")
-    if not os.path.exists(targets_path):
-        console.print("[red]✘ data/targets.json introuvable.[/red]")
-        return
-    with open(targets_path, encoding="utf-8") as f:
-        targets = json.load(f)
+def _show_targets(console, Table, Panel, targets_dict: dict | None = None) -> None:
+    """Affiche les entreprises et mots-cles courants avec recommandations volume.
+
+    Args:
+        targets_dict : si fourni, affiche cette liste en memoire (utile dans le menu
+            d'edition pour voir les modifs non encore sauvegardees). Sinon, charge
+            depuis data/targets.json sur disque.
+    """
+    if targets_dict is not None:
+        targets = targets_dict
+        is_live = True
+    else:
+        targets_path = os.path.join(DATA_DIR, "targets.json")
+        if not os.path.exists(targets_path):
+            console.print("[red]✘ data/targets.json introuvable.[/red]")
+            return
+        with open(targets_path, encoding="utf-8") as f:
+            targets = json.load(f)
+        is_live = False
     companies = targets.get("companies", [])
     keywords = targets.get("keywords", [])
 
@@ -270,8 +300,11 @@ def _show_targets(console, Table, Panel) -> None:
     else:
         dur_est = f"~{(nb_q * 0.055) + 5:.1f}h (TRES long)"
 
+    live_suffix = " [yellow](non encore sauvegarde)[/yellow]" if is_live else ""
+
     # Tableau companies
-    t1 = Table(title=f"🏢  Entreprises surveillees ({len(companies)})", border_style="cyan")
+    t1 = Table(title=f"🏢  Entreprises surveillees ({len(companies)}){live_suffix}",
+               border_style="cyan")
     t1.add_column("#", style="dim", justify="right")
     t1.add_column("Nom", style="cyan")
     for i, c in enumerate(companies, 1):
@@ -279,7 +312,8 @@ def _show_targets(console, Table, Panel) -> None:
     console.print(t1)
 
     # Tableau keywords
-    t2 = Table(title=f"🔑  Mots-cles techniques ({len(keywords)})", border_style="cyan")
+    t2 = Table(title=f"🔑  Mots-cles techniques ({len(keywords)}){live_suffix}",
+               border_style="cyan")
     t2.add_column("#", style="dim", justify="right")
     t2.add_column("Mot-cle", style="green")
     for i, k in enumerate(keywords, 1):
@@ -301,11 +335,39 @@ def _show_targets(console, Table, Panel) -> None:
     console.print()
 
 
+def _print_mini_list(console, Table, label: str, items: list[str], color: str) -> None:
+    """Affiche une mini-liste numerotee des items courants — utilisee apres chaque
+    modification pour donner un retour visuel immediat de l'etat in-memory."""
+    if not items:
+        console.print(f"  [dim]({label} : liste vide)[/dim]")
+        return
+    t = Table(title=f"{label} ({len(items)})", border_style=color, show_header=False, expand=False)
+    t.add_column("#", style="dim", justify="right", width=4)
+    t.add_column("Valeur", style=color)
+    for i, item in enumerate(items, 1):
+        t.add_row(str(i), item)
+    console.print(t)
+
+
 def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> None:
-    """Menu d'edition des cibles : ajouter/supprimer entreprises et mots-cles."""
+    """Menu d'edition des cibles : ajouter/supprimer entreprises et mots-cles.
+
+    Apres chaque modification, affiche la liste in-memory mise a jour (avec
+    indicateur 'non encore sauvegarde') pour que l'utilisateur voie immediatement
+    ce qu'il vient de taper et puisse corriger une faute de frappe.
+
+    Option 0 (Annuler) revient a l'etat sauvegarde sur disque.
+    Option 7 (Quitter sans sauvegarder) quitte le menu sans toucher au fichier.
+    Option 6 (Sauvegarder et continuer) ecrit data/targets.json.
+    """
     targets_path = os.path.join(DATA_DIR, "targets.json")
     with open(targets_path, encoding="utf-8") as f:
-        targets = json.load(f)
+        targets_disk = json.load(f)
+    # Copie de travail in-memory (modifs uniquement persistees sur action 6)
+    targets = {
+        "companies": list(targets_disk.get("companies", [])),
+        "keywords":  list(targets_disk.get("keywords", [])),
+    }
 
     while True:
         console.print(Panel(
@@ -313,61 +375,79 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
             "  [bold]2[/bold]  ➖  Supprimer une entreprise\n"
             "  [bold]3[/bold]  ➕  Ajouter un mot-cle\n"
             "  [bold]4[/bold]  ➖  Supprimer un mot-cle\n"
-            "  [bold]5[/bold]  📋  Revoir la liste actuelle\n"
-            "  [bold]6[/bold]  ✅  Sauvegarder et continuer",
+            "  [bold]5[/bold]  📋  Revoir la liste actuelle (in-memory)\n"
+            "  [bold]6[/bold]  ✅  [green]Sauvegarder et continuer[/green]\n"
+            "  [bold]7[/bold]  ↩  [yellow]Quitter sans sauvegarder[/yellow] (annule toutes les modifs)",
             title="✏️  Editer les cibles",
             border_style="yellow",
         ))
         action = Prompt.ask(
             "  [bold]Que veux-tu faire ?[/bold] "
-            "[dim](tape un chiffre de 1 a 6 puis Entree)[/dim]",
-            choices=["1", "2", "3", "4", "5", "6"],
+            "[dim](tape un chiffre de 1 a 7 puis Entree)[/dim]",
+            choices=["1", "2", "3", "4", "5", "6", "7"],
             default="6",
         )
 
         if action == "1":
-            new = Prompt.ask("  Nom EXACT de l'entreprise a ajouter").strip()
+            new = Prompt.ask("  [bold]Nom EXACT de l'entreprise a ajouter[/bold] "
+                             "[dim](respecte la casse)[/dim]").strip()
             if new and new not in targets["companies"]:
                 targets["companies"].append(new)
-                console.print(f"  [green]✓ Ajoute : {new}[/green]")
+                console.print(f"\n  [green]✓ Ajoute : '{new}'[/green]")
+                console.print("  [dim]Liste a jour ci-dessous (verifie l'orthographe) :[/dim]")
+                _print_mini_list(console, Table, "🏢  Entreprises", targets["companies"], "cyan")
             elif new in targets["companies"]:
-                console.print(f"  [yellow]⚠ {new} est deja dans la liste.[/yellow]")
+                console.print(f"  [yellow]⚠ '{new}' est deja dans la liste.[/yellow]")
+            else:
+                console.print("  [yellow]⚠ Saisie vide, rien ajoute.[/yellow]")
         elif action == "2":
             if not targets["companies"]:
                 console.print("  [yellow]Aucune entreprise a supprimer.[/yellow]")
                 continue
-            for i, c in enumerate(targets["companies"], 1):
-                console.print(f"    {i}. {c}")
-            idx = IntPrompt.ask("  Numero de l'entreprise a supprimer (0 = annuler)", default=0)
+            _print_mini_list(console, Table, "🏢  Entreprises", targets["companies"], "cyan")
+            idx = IntPrompt.ask("  [bold]Numero de l'entreprise a supprimer[/bold] "
+                                "[dim](0 = annuler la suppression)[/dim]", default=0)
             if 1 <= idx <= len(targets["companies"]):
                 removed = targets["companies"].pop(idx - 1)
-                console.print(f"  [green]✓ Supprime : {removed}[/green]")
+                console.print(f"\n  [green]✓ Supprime : '{removed}'[/green]")
+                console.print("  [dim]Liste a jour ci-dessous :[/dim]")
+                _print_mini_list(console, Table, "🏢  Entreprises", targets["companies"], "cyan")
         elif action == "3":
-            new = Prompt.ask("  Nouveau mot-cle (ex: 'plasma deposition')").strip()
+            new = Prompt.ask("  [bold]Nouveau mot-cle a ajouter[/bold] "
+                             "[dim](ex: plasma deposition)[/dim]").strip()
             if new and new not in targets["keywords"]:
                 targets["keywords"].append(new)
-                console.print(f"  [green]✓ Ajoute : {new}[/green]")
+                console.print(f"\n  [green]✓ Ajoute : '{new}'[/green]")
+                console.print("  [dim]Liste a jour ci-dessous (verifie l'orthographe) :[/dim]")
+                _print_mini_list(console, Table, "🔑  Mots-cles", targets["keywords"], "green")
             elif new in targets["keywords"]:
-                console.print(f"  [yellow]⚠ {new} est deja dans la liste.[/yellow]")
+                console.print(f"  [yellow]⚠ '{new}' est deja dans la liste.[/yellow]")
+            else:
+                console.print("  [yellow]⚠ Saisie vide, rien ajoute.[/yellow]")
         elif action == "4":
             if not targets["keywords"]:
                 console.print("  [yellow]Aucun mot-cle a supprimer.[/yellow]")
                 continue
-            for i, k in enumerate(targets["keywords"], 1):
-                console.print(f"    {i}. {k}")
-            idx = IntPrompt.ask("  Numero du mot-cle a supprimer (0 = annuler)", default=0)
+            _print_mini_list(console, Table, "🔑  Mots-cles", targets["keywords"], "green")
+            idx = IntPrompt.ask("  [bold]Numero du mot-cle a supprimer[/bold] "
+                                "[dim](0 = annuler la suppression)[/dim]", default=0)
             if 1 <= idx <= len(targets["keywords"]):
                 removed = targets["keywords"].pop(idx - 1)
-                console.print(f"  [green]✓ Supprime : {removed}[/green]")
+                console.print(f"\n  [green]✓ Supprime : '{removed}'[/green]")
+                console.print("  [dim]Liste a jour ci-dessous :[/dim]")
+                _print_mini_list(console, Table, "🔑  Mots-cles", targets["keywords"], "green")
         elif action == "5":
-            _show_targets(console, Table, Panel)
+            # Affiche la liste IN-MEMORY (avec indicateur 'non sauvegarde')
+            _show_targets(console, Table, Panel, targets_dict=targets)
             continue
         elif action == "6":
             with open(targets_path, "w", encoding="utf-8") as f:
                 json.dump(targets, f, ensure_ascii=False, indent=2)
             console.print(Panel(
                 f"[green]✅ Cibles sauvegardees dans {targets_path}[/green]\n"
-                f"   {len(targets['companies'])} entreprise(s), {len(targets['keywords'])} mot(s)-cle(s)",
+                f"   {len(targets['companies'])} entreprise(s), {len(targets['keywords'])} mot(s)-cle(s)\n\n"
+                f"[dim]Ces modifications sont desormais permanentes : elles seront\n"
+                f"utilisees par defaut a chaque prochain lancement du programme.[/dim]",
                 border_style="green",
             ))
             console.print()
@@ -379,10 +459,27 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
             except Exception:
                 pass
             return
+        elif action == "7":
+            # Annulation : on n'ecrit rien, l'etat sur disque reste celui d'origine
+            modified_companies = targets["companies"] != targets_disk.get("companies", [])
+            modified_keywords  = targets["keywords"]  != targets_disk.get("keywords", [])
+            if modified_companies or modified_keywords:
+                if not Confirm.ask(
+                    "\n  [yellow]Tu as fait des modifications non sauvegardees. "
+                    "Vraiment annuler et tout perdre ?[/yellow]",
+                    default=False,
+                ):
+                    continue
+            console.print("[yellow]↩ Annulation : aucune modification sauvegardee. "
+                          "Le fichier targets.json reste inchange.[/yellow]\n")
+            return
 
 
-def _choose_volume(console, Table, Panel, Prompt, IntPrompt) -> int:
-    """Affiche les 5 presets de volume RSS et retourne le choix utilisateur."""
+def _choose_volume(console, Table, Panel, Prompt, IntPrompt) -> int | None:
+    """Affiche les 5 presets de volume RSS et retourne le choix utilisateur.
+
+    Retourne None si l'utilisateur veut revenir a l'etape precedente (touche r/p).
+    """
     presets = [
         ("1", "🚀  Test rapide",       25,  "~5 min", "Pour valider que tout fonctionne avant un vrai run."),
         ("2", "📰  Standard hebdo",    50,  "~3-4h",  "Usage normal hebdomadaire. Suffisant si tu lances chaque semaine."),
@@ -411,10 +508,15 @@ def _choose_volume(console, Table, Panel, Prompt, IntPrompt) -> int:
         "  [bold]Tape le numero du preset que tu veux choisir[/bold] "
         "[dim](1, 2, 3, 4 ou 5) puis Entree.[/dim]\n"
         "  [dim]Si tu appuies juste sur Entree sans rien taper, le preset "
-        "[bold cyan]2 (Standard hebdo)[/bold cyan] est selectionne.[/dim]"
+        "[bold cyan]2 (Standard hebdo)[/bold cyan] est selectionne.[/dim]\n"
+        "  [dim magenta]💡 Tape [bold]r[/bold] pour revenir a l'etape precedente "
+        "(modifier les cibles).[/dim magenta]"
     )
     chosen = Prompt.ask("  [bold]Ton choix[/bold]",
-                        choices=["1", "2", "3", "4", "5"], default="2")
+                        choices=["1", "2", "3", "4", "5", "r", "p"],
+                        default="2", show_choices=False)
+    if chosen in ("r", "p"):
+        return None
     if chosen == "5":
         nb = IntPrompt.ask(
             "  [bold]Nombre d'articles par source[/bold] [dim](entre 5 et 1000)[/dim]",
