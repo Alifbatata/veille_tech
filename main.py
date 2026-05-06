@@ -196,23 +196,30 @@ def _interactive_pre_run() -> int | None:
         "valeur par defaut si tu appuies juste sur Entree sans rien taper.\n"
         "  • [bold magenta]Pour revenir a l'etape precedente[/bold magenta] : tape "
         "[bold]r[/bold] (ou [bold]p[/bold]) quand le programme te le permet.\n"
-        "  • Au [bold]recap final[/bold], si tu reponds [bold]Non[/bold] tu rebouchles "
+        "  • Au [bold]recap final[/bold], si tu reponds [bold]Non[/bold] tu reboucles "
         "sur tout depuis le debut (cibles puis volume puis recap).\n"
         "  • Pour [bold]annuler completement[/bold] et fermer le programme : "
         "appuie sur [bold]Ctrl+C[/bold] a tout moment."
     )
     console.print(Panel(nav, border_style="magenta", padding=(1, 1)))
     console.print()
+    _press_enter_to_continue(console, "Lis bien les instructions ci-dessus, puis")
 
     # ----- ETAPE 1 : Verification heure -----
-    console.print("[bold blue]── Etape 1/3 : verification de l'heure ──[/bold blue]")
+    console.print("\n[bold blue]══════════════════════════════════════════════════════════════[/bold blue]")
+    console.print("[bold blue]  Etape 1/3 : verification de l'heure                         [/bold blue]")
+    console.print("[bold blue]══════════════════════════════════════════════════════════════[/bold blue]\n")
     _check_hour_warning(console, Confirm, Panel, Text)
+    _press_enter_to_continue(console, "Heure verifiee. Appuie sur Entree pour passer a l'etape 2 (cibles)")
 
     # ----- ETAPES 2 (cibles) + 3 (volume) + recap, avec boucle de retour -----
     while True:
         # ----- ETAPE 2 : cibles -----
-        console.print("[bold blue]── Etape 2/3 : cibles (entreprises + mots-cles) ──[/bold blue]")
+        console.print("\n[bold blue]══════════════════════════════════════════════════════════════[/bold blue]")
+        console.print("[bold blue]  Etape 2/3 : cibles (entreprises + mots-cles)                [/bold blue]")
+        console.print("[bold blue]══════════════════════════════════════════════════════════════[/bold blue]\n")
         _show_targets(console, Table, Panel)
+        _press_enter_to_continue(console, "Prends le temps de lire les cibles. Appuie sur Entree pour la suite")
 
         edit_msg = (
             "  [bold]Veux-tu modifier ces cibles avant de lancer ?[/bold] "
@@ -222,7 +229,9 @@ def _interactive_pre_run() -> int | None:
             _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm)
 
         # ----- ETAPE 3 : volume + retour eventuel -----
-        console.print("\n[bold blue]── Etape 3/3 : volume d'articles par source ──[/bold blue]")
+        console.print("\n[bold blue]══════════════════════════════════════════════════════════════[/bold blue]")
+        console.print("[bold blue]  Etape 3/3 : volume d'articles par source                    [/bold blue]")
+        console.print("[bold blue]══════════════════════════════════════════════════════════════[/bold blue]\n")
         nb = _choose_volume(console, Table, Panel, Prompt, IntPrompt)
         if nb is None:
             # L'utilisateur a tape "r" pour revenir aux cibles
@@ -233,6 +242,23 @@ def _interactive_pre_run() -> int | None:
         if _show_recap_and_confirm(console, Panel, Confirm, nb):
             return nb
         console.print("[yellow]↩ Retour a l'etape 2 (cibles) pour modifier ta config…[/yellow]\n")
+
+
+def _press_enter_to_continue(console, message: str = "Appuie sur Entree pour continuer") -> None:
+    """Pause stylisee : attend que l'utilisateur appuie sur Entree pour avancer.
+
+    Permet de ne pas faire defiler trop vite les ecrans denses et donner le temps
+    a un novice de lire chaque section avant de passer a la suivante.
+    """
+    try:
+        from rich.prompt import Prompt
+        Prompt.ask(f"[dim]  ⏎  {message}[/dim]", default="", show_default=False)
+    except (ImportError, EOFError, KeyboardInterrupt):
+        # Mode degrade : input() classique
+        try:
+            input(f"  ⏎  {message}... ")
+        except (EOFError, KeyboardInterrupt):
+            pass
 
 
 def _check_hour_warning(console, Confirm, Panel, Text) -> None:
