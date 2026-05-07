@@ -366,8 +366,11 @@ def _ask_field(
                 label_parts.append("[bold green]g[/bold green]arder cette valeur")
             actions.append("m")
             label_parts.append("[bold yellow]m[/bold yellow]odifier")
-            actions.append("v")
-            label_parts.append("[bold cyan]v[/bold cyan]oir en clair")
+            # 'v' (voir en clair) uniquement pour champs secrets : pour un email
+            # ou une valeur deja affichee en clair dans la carte, l'option n'apporte rien.
+            if field.secret:
+                actions.append("v")
+                label_parts.append("[bold cyan]v[/bold cyan]oir en clair")
         else:
             actions.append("s")
             label_parts.append("[bold green]s[/bold green]aisir une valeur")
@@ -481,7 +484,7 @@ def _legend_actions() -> None:
         "     [bold]g[/bold] = garder la valeur proposee   •  "
         "[bold]s[/bold] = saisir une valeur (si aucune proposee)\n"
         "     [bold]m[/bold] = modifier la valeur          •  "
-        "[bold]v[/bold] = voir en clair\n"
+        "[bold]v[/bold] = voir en clair [dim](uniquement champs masques)[/dim]\n"
         "     [bold]i[/bold] = ignorer ce champ (optionnel)•  "
         "[bold]r[/bold] = restaurer la valeur .env d'origine\n"
         "     [bold]p[/bold] = revenir au champ precedent\n"
