@@ -59,16 +59,22 @@ RECENT_DAYS_LIMIT: int = 90          # Fenêtre de fraîcheur (jours). Veille te
 
 # --- Paramètres dynamiques (chargés depuis JSON) ---------------------------- #
 
-_cached_targets: tuple[list[str], list[str], list[str]] | None = None
+_cached_targets: tuple[list[str], list[str], list[str], list[str]] | None = None
 
-def load_targets(path: str | None = None) -> tuple[list[str], list[str], list[str]]:
+def load_targets(path: str | None = None) -> tuple[list[str], list[str], list[str], list[str]]:
     """
-    Charge les listes d'entreprises, mots-clés couplés et solo_keywords
-    depuis data/targets.json. Retourne des listes vides en cas d'erreur.
+    Charge les 4 listes de cibles depuis data/targets.json :
+      - companies     : entreprises industrielles (couplées avec keywords pour GNews)
+      - keywords      : mots-clés techniques (couplés avec companies pour GNews +
+                        broadcastés dans toutes les sources scientifiques)
+      - solo_keywords : phrases multi-mots cherchées SEULES (sans entreprise),
+                        broadcastées dans toutes les sources (GNews + scientifiques)
+      - research_orgs : labos / universités / instituts de recherche qui PUBLIENT.
+                        Broadcastés UNIQUEMENT dans les sources scientifiques
+                        (arXiv, OpenAlex, Crossref, HAL, Semantic Scholar, Tavily,
+                        Google Patents). PAS dans GNews (peu de couverture presse).
 
-    solo_keywords : phrases cherchées SEULES (sans entreprise associée), utiles
-    quand un thème est très spécifique et n'apparaît jamais avec un nom de
-    société (ex: "Physical vapor deposition coating process").
+    Retourne des listes vides en cas d'erreur.
     """
     global _cached_targets
     if _cached_targets is not None:
@@ -80,7 +86,7 @@ def load_targets(path: str | None = None) -> tuple[list[str], list[str], list[st
 
     if not os.path.exists(path):
         logger.error("Fichier de cibles non trouvé : %s. Les listes de cibles seront vides.", path)
-        _cached_targets = ([], [], [])
+        _cached_targets = ([], [], [], [])
         return _cached_targets
 
     try:
@@ -88,9 +94,10 @@ def load_targets(path: str | None = None) -> tuple[list[str], list[str], list[st
             data = json.load(f)
 
         # Dédoublonnage optimisé (comportement de set) avec préservation de l'ordre
-        companies = list(dict.fromkeys(data.get("companies", [])))
-        keywords = list(dict.fromkeys(data.get("keywords", [])))
+        companies     = list(dict.fromkeys(data.get("companies", [])))
+        keywords      = list(dict.fromkeys(data.get("keywords", [])))
         solo_keywords = list(dict.fromkeys(data.get("solo_keywords", [])))
+        research_orgs = list(dict.fromkeys(data.get("research_orgs", [])))
 
         if not companies or not keywords:
             logger.warning("Le fichier %s contient des listes vides pour 'companies' ou 'keywords'.", path)
@@ -99,17 +106,17 @@ def load_targets(path: str | None = None) -> tuple[list[str], list[str], list[st
         # en cas d'imports croisés depuis plusieurs modules au runtime.
         if not os.environ.get("_TARGETS_LOGGED"):
             logger.info(
-                "Cibles chargées depuis %s (%d entreprises, %d mots-clés couplés, %d solo).",
-                path, len(companies), len(keywords), len(solo_keywords),
+                "Cibles chargées depuis %s (%d entreprises, %d mots-clés couplés, %d solo, %d labos).",
+                path, len(companies), len(keywords), len(solo_keywords), len(research_orgs),
             )
             os.environ["_TARGETS_LOGGED"] = "1"
 
-        _cached_targets = (companies, keywords, solo_keywords)
+        _cached_targets = (companies, keywords, solo_keywords, research_orgs)
         return _cached_targets
 
     except (json.JSONDecodeError, OSError) as e:
         logger.error("Erreur d'accès ou de parsing de %s: %s. Les listes de cibles seront vides.", path, e)
-        _cached_targets = ([], [], [])
+        _cached_targets = ([], [], [], [])
         return _cached_targets
 
 # --- Initialisation des variables globales ---------------------------------- #
@@ -117,4 +124,5 @@ def load_targets(path: str | None = None) -> tuple[list[str], list[str], list[st
 TARGET_COMPANIES: list[str]
 KEYWORDS: list[str]
 SOLO_KEYWORDS: list[str]
-TARGET_COMPANIES, KEYWORDS, SOLO_KEYWORDS = load_targets()
+RESEARCH_ORGS: list[str]
+TARGET_COMPANIES, KEYWORDS, SOLO_KEYWORDS, RESEARCH_ORGS = load_targets()

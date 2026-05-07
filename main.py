@@ -260,10 +260,11 @@ def _interactive_pre_run() -> int | None:
             _nc = len(_t.get("companies", []))
             _nk = len(_t.get("keywords", []))
             _ns = len(_t.get("solo_keywords", []))
+            _nr = len(_t.get("research_orgs", []))
         except (OSError, json.JSONDecodeError):
-            _nc = _nk = _ns = 0
+            _nc = _nk = _ns = _nr = 0
         console.print()
-        if not _check_quotas_panel(console, Table, Panel, Confirm, _nc, _nk, _ns, nb):
+        if not _check_quotas_panel(console, Table, Panel, Confirm, _nc, _nk, _ns, nb, _nr):
             console.print("[yellow]↩ Retour a l'etape 3 (cibles) pour reduire le volume…[/yellow]\n")
             continue
 
@@ -480,13 +481,18 @@ _QUOTA_TAVILY_PER_RUN_WARN   = 200   # 1000/mois ÷ 5 runs/mois ≈ 200
 
 
 def _compute_request_counts(
-    nb_companies: int, nb_keywords: int, nb_solos: int, nb_per_source: int
+    nb_companies: int, nb_keywords: int, nb_solos: int, nb_per_source: int,
+    nb_research_orgs: int = 0,
 ) -> dict[str, int]:
     """Estime le nombre de requetes par source pour CE run.
 
     Le mapping refletre exactement ce que les build_*_queries() produisent
     dans scraper.py + le pipeline d'IA filter (batchs configures via
     AI_BATCH_SIZE, defaut 30, lu depuis l'env comme dans ai_filter.py).
+
+    research_orgs sont broadcastes UNIQUEMENT sur les sources scientifiques
+    (arXiv, OpenAlex, Crossref, HAL, S2, Tavily, Patents) et PAS sur GNews
+    (les labos publient peu de communiques de presse).
     """
     nb_q_gnews = nb_companies * nb_keywords + nb_solos
 
@@ -498,29 +504,28 @@ def _compute_request_counts(
 
     # Estimation grossiere des articles BRUTS collectes
     # GNews : ~5 articles uniques par requete apres URL + titre dedup
-    # (Google syndique le meme article via plusieurs outlets, beaucoup de doublons)
     raw_articles = (
         nb_per_source * 5      # 5 flux RSS
-        + 100                  # ~20 articles × 5-7 sources thematiques + autres
+        + 100                  # ~20 articles × 5-7 sources thematiques
         + nb_q_gnews * 5       # ~5 articles uniques/req GNews apres dedup
+        + nb_research_orgs * 8 # ~8 articles uniques/req research_org sur 7 sources
     )
-    # Apres dedup global ~70% retenus, batchs de AI_BATCH_SIZE articles
     nb_batches = max(3, int(raw_articles * 0.7 / ai_batch_size))
 
-    # Sources scientifiques : base hardcodee + broadcast keywords + broadcast solos
+    # Sources scientifiques : base + keywords + solos + research_orgs
+    sci_extra = nb_keywords + nb_solos + nb_research_orgs
     return {
         "RSS":              5,
-        "arXiv search":     7 + nb_keywords + nb_solos,   # 7 base symetriques
-        "OpenAlex":         6 + nb_keywords + nb_solos,
-        "Crossref":         8 + nb_keywords + nb_solos,   # 8 base apres split
-        "HAL":              6 + nb_keywords + nb_solos,   # 6 base bilingues
-        "Semantic Scholar": 7 + nb_keywords + nb_solos,   # 7 base apres split
-        "Tavily":           4 + nb_keywords + nb_solos,
-        "Google Patents":   8 + nb_keywords + nb_solos,   # 8 base + broadcast
-        "Google News":      nb_q_gnews,
+        "arXiv search":     7 + sci_extra,   # 7 base symetriques
+        "OpenAlex":         6 + sci_extra,
+        "Crossref":         8 + sci_extra,   # 8 base apres split
+        "HAL":              6 + sci_extra,   # 6 base bilingues
+        "Semantic Scholar": 7 + sci_extra,   # 7 base apres split
+        "Tavily":           4 + sci_extra,
+        "Google Patents":   8 + sci_extra,   # 8 base + broadcast
+        "Google News":      nb_q_gnews,      # PAS de research_orgs (peu de news)
         "Gemini Flash":     nb_batches,
-        # Donnees de transparence (pas affichees comme requetes mais utiles pour
-        # expliquer le calcul a l'utilisateur dans le panel)
+        # Donnees de transparence
         "_raw_articles_estimate": raw_articles,
         "_ai_batch_size":         ai_batch_size,
     }
@@ -567,6 +572,7 @@ def _estimate_run_duration_h(nb_per_source: int, nb_q: int) -> tuple[float, floa
 def _check_quotas_panel(
     console, Table, Panel, Confirm,
     nb_companies: int, nb_keywords: int, nb_solos: int, nb_per_source: int,
+    nb_research_orgs: int = 0,
 ) -> bool:
     """Verifie les quotas API pour le run prevu et affiche un tableau pedagogique.
 
@@ -578,7 +584,9 @@ def _check_quotas_panel(
     Returns:
         True si l'utilisateur veut continuer, False pour revenir aux cibles.
     """
-    counts = _compute_request_counts(nb_companies, nb_keywords, nb_solos, nb_per_source)
+    counts = _compute_request_counts(
+        nb_companies, nb_keywords, nb_solos, nb_per_source, nb_research_orgs,
+    )
 
     t = Table(
         title="🔒  Verification des quotas API pour CE run",
@@ -725,6 +733,7 @@ def _show_targets(console, Table, Panel, targets_dict: dict | None = None) -> No
     companies = sorted(targets.get("companies", []), key=str.lower)
     keywords = sorted(targets.get("keywords", []), key=str.lower)
     solo_keywords = sorted(targets.get("solo_keywords", []), key=str.lower)
+    research_orgs = sorted(targets.get("research_orgs", []), key=str.lower)
 
     # Nombre total de requetes GNews = (entreprises × mots-cles couples) + solos
     nb_q = len(companies) * len(keywords) + len(solo_keywords)
@@ -778,6 +787,20 @@ def _show_targets(console, Table, Panel, targets_dict: dict | None = None) -> No
         for i, k in enumerate(solo_keywords, 1):
             t3.add_row(str(i), k)
     console.print(t3)
+
+    # Tableau research_orgs (broadcastes uniquement sur sources scientifiques)
+    t4 = Table(
+        title=f"🎓  Organismes de recherche — labos / universites qui PUBLIENT ({len(research_orgs)}){live_suffix}",
+        border_style="blue",
+    )
+    t4.add_column("#", style="dim", justify="right")
+    t4.add_column("Nom (broadcaste sur arXiv/OpenAlex/Crossref/HAL/SS/Tavily/Patents)", style="blue")
+    if not research_orgs:
+        t4.add_row("—", "[dim](liste vide — aucun labo cible specifiquement)[/dim]")
+    else:
+        for i, org in enumerate(research_orgs, 1):
+            t4.add_row(str(i), org)
+    console.print(t4)
 
     # Recommandations — on marque dynamiquement la ligne correspondant a ta config
     # actuelle (basee sur nb_q = entreprises × mots-cles + solos).
@@ -844,34 +867,37 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
     targets_path = os.path.join(DATA_DIR, "targets.json")
     with open(targets_path, encoding="utf-8") as f:
         targets_disk = json.load(f)
-    # Copie de travail in-memory (modifs uniquement persistees sur action 8).
+    # Copie de travail in-memory (modifs uniquement persistees sur action 10).
     # Tri alphabetique : ainsi l'index affiche correspond toujours a l'index
     # interne, et les suppressions par numero ciblent le bon item.
     targets = {
         "companies":     sorted(targets_disk.get("companies", []), key=str.lower),
         "keywords":      sorted(targets_disk.get("keywords", []), key=str.lower),
         "solo_keywords": sorted(targets_disk.get("solo_keywords", []), key=str.lower),
+        "research_orgs": sorted(targets_disk.get("research_orgs", []), key=str.lower),
     }
 
     while True:
         console.print(Panel(
-            "  [bold green]1[/bold green]  ➕  Ajouter une entreprise\n"
+            "  [bold green]1[/bold green]  ➕  Ajouter une entreprise [dim](industriel — couple avec keywords sur GNews)[/dim]\n"
             "  [bold yellow]2[/bold yellow]  ➖  Supprimer une entreprise\n"
-            "  [bold green]3[/bold green]  ➕  Ajouter un mot-cle [dim](couple avec chaque entreprise)[/dim]\n"
+            "  [bold green]3[/bold green]  ➕  Ajouter un mot-cle COUPLE [dim](associe a chaque entreprise sur GNews + broadcast science)[/dim]\n"
             "  [bold yellow]4[/bold yellow]  ➖  Supprimer un mot-cle couple\n"
-            "  [bold magenta]5[/bold magenta]  ➕  Ajouter un mot-cle SOLO [dim](cherche seul, sans entreprise)[/dim]\n"
+            "  [bold magenta]5[/bold magenta]  ➕  Ajouter un mot-cle SOLO [dim](phrase cherchee SEULE, broadcast partout)[/dim]\n"
             "  [bold yellow]6[/bold yellow]  ➖  Supprimer un mot-cle SOLO\n"
-            "  [bold cyan]7[/bold cyan]  📋  Revoir la liste actuelle (in-memory)\n"
-            "  [bold green]8[/bold green]  ✅  [green]Sauvegarder et continuer[/green]\n"
-            "  [bold yellow]9[/bold yellow]  ↩  [yellow]Quitter sans sauvegarder[/yellow] (annule toutes les modifs)",
+            "  [bold blue]7[/bold blue]  ➕  Ajouter un labo / organisme de recherche [dim](broadcast science UNIQUEMENT)[/dim]\n"
+            "  [bold yellow]8[/bold yellow]  ➖  Supprimer un labo / organisme de recherche\n"
+            "  [bold cyan]9[/bold cyan]  📋  Revoir la liste actuelle (in-memory)\n"
+            "  [bold green]10[/bold green] ✅  [green]Sauvegarder et continuer[/green]\n"
+            "  [bold yellow]11[/bold yellow] ↩  [yellow]Quitter sans sauvegarder[/yellow] (annule toutes les modifs)",
             title="✏️  Editer les cibles",
             border_style="yellow",
         ))
         action = Prompt.ask(
             "  [bold]Que veux-tu faire ?[/bold] "
-            "[dim](tape 1-9, Entree = [bold green]8[/bold green] sauvegarder)[/dim]",
-            choices=["1", "2", "3", "4", "5", "6", "7", "8", "9"],
-            default="8",
+            "[dim](tape 1-11, Entree = [bold green]10[/bold green] sauvegarder)[/dim]",
+            choices=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"],
+            default="10",
             show_default=False,
         )
 
@@ -970,22 +996,59 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
                 console.print("  [dim]Liste a jour ci-dessous :[/dim]")
                 _print_mini_list(console, Table, "🎯  Mots-cles SOLO", targets["solo_keywords"], "magenta")
         elif action == "7":
+            console.print(
+                "  [bold blue]ℹ Organisme de recherche[/bold blue] : labo, universite, "
+                "institut public ou prive QUI PUBLIE des papers / depose des brevets.\n"
+                "  Exemples : CEA-Leti, CNRS, EPFL, Fraunhofer IST, MIT, NIMS...\n"
+                "  Le nom sera cherche [bold]UNIQUEMENT dans les sources scientifiques[/bold] "
+                "(arXiv, OpenAlex, Crossref, HAL, Semantic Scholar, Tavily, Patents).\n"
+                "  [yellow]Pas de recherche dans Google News[/yellow] : ces organismes "
+                "publient peu de communiques de presse.\n"
+            )
+            new = Prompt.ask("  [bold]Nom EXACT du labo / organisme a ajouter[/bold] "
+                             "[dim](respecte la casse)[/dim]").strip()
+            if new and new not in targets["research_orgs"]:
+                targets["research_orgs"].append(new)
+                targets["research_orgs"].sort(key=str.lower)
+                console.print(f"\n  [green]✓ Labo ajoute : '{new}'[/green]")
+                console.print("  [dim]Liste a jour ci-dessous (verifie l'orthographe) :[/dim]")
+                _print_mini_list(console, Table, "🎓  Organismes de recherche", targets["research_orgs"], "blue")
+            elif new in targets["research_orgs"]:
+                console.print(f"  [yellow]⚠ '{new}' est deja dans la liste.[/yellow]")
+            else:
+                console.print("  [yellow]⚠ Saisie vide, rien ajoute.[/yellow]")
+        elif action == "8":
+            if not targets["research_orgs"]:
+                console.print("  [yellow]Aucun labo / organisme a supprimer (liste vide).[/yellow]")
+                continue
+            _print_mini_list(console, Table, "🎓  Organismes de recherche", targets["research_orgs"], "blue")
+            idx = IntPrompt.ask("  [bold]Numero du labo / organisme a supprimer[/bold] "
+                                "[dim](Entree = [bold cyan]0[/bold cyan] annuler)[/dim]",
+                                default=0, show_default=False)
+            if 1 <= idx <= len(targets["research_orgs"]):
+                removed = targets["research_orgs"].pop(idx - 1)
+                console.print(f"\n  [green]✓ Labo supprime : '{removed}'[/green]")
+                console.print("  [dim]Liste a jour ci-dessous :[/dim]")
+                _print_mini_list(console, Table, "🎓  Organismes de recherche", targets["research_orgs"], "blue")
+        elif action == "9":
             # Affiche la liste IN-MEMORY (avec indicateur 'non sauvegarde')
             _show_targets(console, Table, Panel, targets_dict=targets)
             continue
-        elif action == "8":
+        elif action == "10":
             # Tri alphabetique avant ecriture (le in-memory est deja trie, mais
             # filet de securite au cas ou un append aurait oublie le sort).
             targets["companies"].sort(key=str.lower)
             targets["keywords"].sort(key=str.lower)
             targets["solo_keywords"].sort(key=str.lower)
+            targets["research_orgs"].sort(key=str.lower)
             with open(targets_path, "w", encoding="utf-8") as f:
                 json.dump(targets, f, ensure_ascii=False, indent=2)
             console.print(Panel(
                 f"[green]✅ Cibles sauvegardees dans {targets_path}[/green]\n"
                 f"   {len(targets['companies'])} entreprise(s), "
                 f"{len(targets['keywords'])} mot(s)-cle(s) couple(s), "
-                f"{len(targets['solo_keywords'])} solo\n\n"
+                f"{len(targets['solo_keywords'])} solo, "
+                f"{len(targets['research_orgs'])} labo(s)\n\n"
                 f"[dim]Ces modifications sont desormais permanentes : elles seront\n"
                 f"utilisees par defaut a chaque prochain lancement du programme.[/dim]",
                 border_style="green",
@@ -1000,19 +1063,22 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
                 _cfg.TARGET_COMPANIES = list(targets["companies"])
                 _cfg.KEYWORDS = list(targets["keywords"])
                 _cfg.SOLO_KEYWORDS = list(targets["solo_keywords"])
+                _cfg.RESEARCH_ORGS = list(targets["research_orgs"])
                 import src.scraper as _scraper_mod
                 _scraper_mod.TARGET_COMPANIES = list(targets["companies"])
                 _scraper_mod.KEYWORDS = list(targets["keywords"])
                 _scraper_mod.SOLO_KEYWORDS = list(targets["solo_keywords"])
+                _scraper_mod.RESEARCH_ORGS = list(targets["research_orgs"])
             except Exception:
                 pass
             return
-        elif action == "9":
+        elif action == "11":
             # Annulation : on n'ecrit rien, l'etat sur disque reste celui d'origine
             modified_companies = targets["companies"] != targets_disk.get("companies", [])
             modified_keywords  = targets["keywords"]  != targets_disk.get("keywords", [])
             modified_solo      = targets["solo_keywords"] != targets_disk.get("solo_keywords", [])
-            if modified_companies or modified_keywords or modified_solo:
+            modified_orgs      = targets["research_orgs"] != targets_disk.get("research_orgs", [])
+            if modified_companies or modified_keywords or modified_solo or modified_orgs:
                 if not Confirm.ask(
                     "\n  [yellow]Tu as fait des modifications NON sauvegardees. "
                     "Vraiment tout annuler et tout perdre ?[/yellow]\n"
@@ -1132,6 +1198,7 @@ def _show_recap_and_confirm(console, Panel, Confirm, nb_articles: int) -> bool:
     nb_companies = len(targets.get("companies", []))
     nb_keywords  = len(targets.get("keywords", []))
     nb_solo      = len(targets.get("solo_keywords", []))
+    nb_orgs      = len(targets.get("research_orgs", []))
     nb_q = nb_companies * nb_keywords + nb_solo
 
     mem_label = _memory_choice_label or "mode par defaut (config.py)"
@@ -1139,7 +1206,9 @@ def _show_recap_and_confirm(console, Panel, Confirm, nb_articles: int) -> bool:
         f"  [bold]🏢  Entreprises surveillees :[/bold] {nb_companies}\n"
         f"  [bold]🔑  Mots-cles couples :[/bold] {nb_keywords}\n"
         f"  [bold]🎯  Mots-cles SOLO :[/bold] [magenta]{nb_solo}[/magenta]"
-        f"{' [dim](aucun — recherches solo desactivees)[/dim]' if nb_solo == 0 else ''}\n"
+        f"{' [dim](aucun)[/dim]' if nb_solo == 0 else ''}\n"
+        f"  [bold]🎓  Organismes de recherche :[/bold] [blue]{nb_orgs}[/blue]"
+        f"{' [dim](aucun — recherches scientifiques par labo desactivees)[/dim]' if nb_orgs == 0 else ' [dim](broadcast science uniquement, pas dans GNews)[/dim]'}\n"
         f"  [bold]📦  Articles par source RSS :[/bold] [cyan]{nb_articles}[/cyan]\n"
         f"  [bold]🔍  Requetes Google News :[/bold] [cyan]{nb_q}[/cyan] "
         f"[dim]({nb_companies}×{nb_keywords} + {nb_solo} solo)[/dim]\n"

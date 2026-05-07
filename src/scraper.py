@@ -20,9 +20,9 @@ from curl_cffi.requests import RequestsError
 
 # Chargement de la config locale
 try:
-    from config import KEYWORDS, MAX_ARTICLES_PER_SOURCE, SOURCES_RSS, TARGET_COMPANIES, USE_MEMORY, SCRAPE_LIMIT_MONTH, RECENT_DAYS_LIMIT, SOLO_KEYWORDS
+    from config import KEYWORDS, MAX_ARTICLES_PER_SOURCE, SOURCES_RSS, TARGET_COMPANIES, USE_MEMORY, SCRAPE_LIMIT_MONTH, RECENT_DAYS_LIMIT, SOLO_KEYWORDS, RESEARCH_ORGS
 except ImportError:
-    from src.config import KEYWORDS, MAX_ARTICLES_PER_SOURCE, SOURCES_RSS, TARGET_COMPANIES, USE_MEMORY, SCRAPE_LIMIT_MONTH, RECENT_DAYS_LIMIT, SOLO_KEYWORDS
+    from src.config import KEYWORDS, MAX_ARTICLES_PER_SOURCE, SOURCES_RSS, TARGET_COMPANIES, USE_MEMORY, SCRAPE_LIMIT_MONTH, RECENT_DAYS_LIMIT, SOLO_KEYWORDS, RESEARCH_ORGS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s — %(message)s")
 logger = logging.getLogger("scraper")
@@ -383,11 +383,14 @@ def build_openalex_queries() -> list[str]:
         '"thin film coating" OR "hard coating" OR DLC',
         '"surface treatment" tribology',
     ]
-    # Broadcast : on cherche aussi chaque mot-cle (couple) et chaque solo dans
-    # OpenAlex, pas seulement dans Google News.
-    kw_q   = [f'"{kw}"' for kw in (KEYWORDS or [])]
-    solo_q = [f'"{kw}"' for kw in (SOLO_KEYWORDS or [])]
-    return list(dict.fromkeys(base + kw_q + solo_q))
+    # Broadcast : on cherche aussi chaque mot-cle (couple), chaque solo et
+    # chaque organisme de recherche (research_org) dans OpenAlex.
+    # Les research_orgs sont cibles via leur nom : ca trouve les papers ou
+    # le labo apparait dans les affiliations d'auteurs ou le texte.
+    kw_q    = [f'"{kw}"' for kw in (KEYWORDS or [])]
+    solo_q  = [f'"{kw}"' for kw in (SOLO_KEYWORDS or [])]
+    org_q   = [f'"{org}"' for org in (RESEARCH_ORGS or [])]
+    return list(dict.fromkeys(base + kw_q + solo_q + org_q))
 
 
 def fetch_openalex_works(query: str, max_results: int = 25) -> list[dict[str, Any]]:
@@ -500,10 +503,11 @@ def build_crossref_queries() -> list[str]:
         "hard coating",
         "DLC coating",
     ]
-    # Broadcast keywords + solos
+    # Broadcast keywords + solos + research_orgs (Crossref accepte texte brut)
     kw_q   = list(KEYWORDS or [])
     solo_q = list(SOLO_KEYWORDS or [])
-    return list(dict.fromkeys(base + kw_q + solo_q))
+    org_q  = list(RESEARCH_ORGS or [])
+    return list(dict.fromkeys(base + kw_q + solo_q + org_q))
 
 
 def fetch_crossref_works(query: str, max_results: int = 20) -> list[dict[str, Any]]:
@@ -596,10 +600,13 @@ def build_hal_queries() -> list[str]:
         '"thin film coating" OR "couche mince"',
         '"hard coating" OR "revêtement dur"',
     ]
-    # Broadcast keywords + solos (chacun en phrase exacte)
+    # Broadcast keywords + solos + research_orgs (chacun en phrase exacte).
+    # HAL est l'archive CNRS donc particulierement pertinent pour les
+    # research_orgs francaises (CEA-Leti, ONERA, Institut Neel, CIRIMAT...).
     kw_q   = [f'"{kw}"' for kw in (KEYWORDS or [])]
     solo_q = [f'"{kw}"' for kw in (SOLO_KEYWORDS or [])]
-    return list(dict.fromkeys(base + kw_q + solo_q))
+    org_q  = [f'"{org}"' for org in (RESEARCH_ORGS or [])]
+    return list(dict.fromkeys(base + kw_q + solo_q + org_q))
 
 
 def fetch_hal_publications(query: str, max_results: int = 20) -> list[dict[str, Any]]:
@@ -679,10 +686,11 @@ def build_semantic_scholar_queries() -> list[str]:
         "thin film coating",
         "hard coating",
     ]
-    # Broadcast keywords + solos
+    # Broadcast keywords + solos + research_orgs (Semantic Scholar texte brut)
     kw_q   = list(KEYWORDS or [])
     solo_q = list(SOLO_KEYWORDS or [])
-    return list(dict.fromkeys(base + kw_q + solo_q))
+    org_q  = list(RESEARCH_ORGS or [])
+    return list(dict.fromkeys(base + kw_q + solo_q + org_q))
 
 
 def fetch_semantic_scholar(query: str, max_results: int = 20) -> list[dict[str, Any]]:
@@ -794,11 +802,15 @@ def build_arxiv_search_queries() -> list[str]:
         'ti:"thin film coating" OR abs:"thin film coating"',
         'ti:"hard coating" OR abs:"hard coating"',
     ]
-    # Broadcast : chaque keyword (couple) et chaque solo cherches dans
-    # titre OU resume. Format arXiv : ti:"X" OR abs:"X".
+    # Broadcast : chaque keyword (couple), chaque solo et chaque research_org
+    # cherches dans titre OU resume. Format arXiv : ti:"X" OR abs:"X".
+    # Pour les research_orgs, on utilise aussi le champ 'all' (tout le doc)
+    # car les noms de labos apparaissent dans les affiliations d'auteurs,
+    # pas forcement dans titre/abstract.
     kw_q   = [f'ti:"{kw}" OR abs:"{kw}"' for kw in (KEYWORDS or [])]
     solo_q = [f'ti:"{kw}" OR abs:"{kw}"' for kw in (SOLO_KEYWORDS or [])]
-    return list(dict.fromkeys(base + kw_q + solo_q))
+    org_q  = [f'all:"{org}"' for org in (RESEARCH_ORGS or [])]
+    return list(dict.fromkeys(base + kw_q + solo_q + org_q))
 
 
 def fetch_arxiv_search(query: str, max_results: int = 20) -> list[dict[str, Any]]:
@@ -873,11 +885,13 @@ def build_web_queries() -> list[str]:
         '("thin film" OR "coating" OR "DLC" OR "hard coating") materials science innovation',
         '("surface treatment" OR "tribology" OR "wear resistance") industrial coating research',
     ]
-    # Broadcast : chaque keyword + solo, en phrase exacte + biais academique
-    # ("research academic" oriente Tavily vers les sources universitaires)
+    # Broadcast : chaque keyword, solo et research_org en phrase exacte
+    # avec biais academique ("research academic" oriente Tavily vers les
+    # sources universitaires plutot que les blogs/wikis).
     kw_q   = [f'"{kw}" research academic' for kw in (KEYWORDS or [])]
     solo_q = [f'"{kw}" research academic' for kw in (SOLO_KEYWORDS or [])]
-    return list(dict.fromkeys(base + kw_q + solo_q))
+    org_q  = [f'"{org}" PVD CVD ALD coating publication' for org in (RESEARCH_ORGS or [])]
+    return list(dict.fromkeys(base + kw_q + solo_q + org_q))
 
 
 def fetch_broad_web_search(query: str, max_results: int = 10) -> list[dict[str, Any]]:
@@ -984,9 +998,13 @@ def build_patents_queries() -> list[str]:
         '"hard coating"',
         '"diamond-like carbon"',  # central en brevets DLC
     ]
+    # Broadcast keywords + solos + research_orgs (les labos sont parfois
+    # cessionnaires de brevets, surtout les organismes publics : CEA, CNRS,
+    # Fraunhofer, MIT, NREL deposent des centaines de brevets/an).
     kw_q   = [f'"{kw}"' for kw in (KEYWORDS or [])]
     solo_q = [f'"{kw}"' for kw in (SOLO_KEYWORDS or [])]
-    return list(dict.fromkeys(base + kw_q + solo_q))
+    org_q  = [f'assignee:"{org}"' for org in (RESEARCH_ORGS or [])]
+    return list(dict.fromkeys(base + kw_q + solo_q + org_q))
 
 
 def fetch_google_patents(query: str, max_results: int = 15) -> list[dict[str, Any]]:
