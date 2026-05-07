@@ -485,18 +485,27 @@ def _compute_request_counts(
     """Estime le nombre de requetes par source pour CE run.
 
     Le mapping refletre exactement ce que les build_*_queries() produisent
-    dans scraper.py + le pipeline d'IA filter (batchs de 30 articles).
+    dans scraper.py + le pipeline d'IA filter (batchs configures via
+    AI_BATCH_SIZE, defaut 30, lu depuis l'env comme dans ai_filter.py).
     """
     nb_q_gnews = nb_companies * nb_keywords + nb_solos
 
-    # Estimation grossiere des articles BRUTS collectes (pour Gemini batches)
+    # AI_BATCH_SIZE : meme source de verite que ai_filter.py (env, defaut 30)
+    try:
+        ai_batch_size = max(1, int(os.environ.get("AI_BATCH_SIZE", "30")))
+    except ValueError:
+        ai_batch_size = 30
+
+    # Estimation grossiere des articles BRUTS collectes
+    # GNews : ~5 articles uniques par requete apres URL + titre dedup
+    # (Google syndique le meme article via plusieurs outlets, beaucoup de doublons)
     raw_articles = (
         nb_per_source * 5      # 5 flux RSS
-        + 100                  # ~20 articles × 5 sources thematiques + autres
-        + nb_q_gnews * 8       # ~8 articles par requete GNews moyenne
+        + 100                  # ~20 articles × 5-7 sources thematiques + autres
+        + nb_q_gnews * 5       # ~5 articles uniques/req GNews apres dedup
     )
-    # Apres dedup ~70%, batchs de 30 articles
-    nb_batches = max(3, int(raw_articles * 0.7 / 30))
+    # Apres dedup global ~70% retenus, batchs de AI_BATCH_SIZE articles
+    nb_batches = max(3, int(raw_articles * 0.7 / ai_batch_size))
 
     return {
         "RSS":              5,
@@ -508,6 +517,10 @@ def _compute_request_counts(
         "Tavily":           4 + nb_solos,
         "Google News":      nb_q_gnews,
         "Gemini Flash":     nb_batches,
+        # Donnees de transparence (pas affichees comme requetes mais utiles pour
+        # expliquer le calcul a l'utilisateur dans le panel)
+        "_raw_articles_estimate": raw_articles,
+        "_ai_batch_size":         ai_batch_size,
     }
 
 
@@ -617,23 +630,32 @@ def _check_quotas_panel(
     t.add_row("Google News", str(gnews), f"~{_QUOTA_GNEWS_SOFT_PER_RUN}/run (soft)",
               f"~{_QUOTA_GNEWS_SOFT_PER_RUN // max(gnews, 1)}/run", status_g)
 
-    # Gemini Flash 2.5 — quota DUR journalier
+    # Gemini Flash 2.5 — quota DUR journalier, mais cascade gere ~80 batches/run
     nb_b = counts["Gemini Flash"]
+    raw_est = counts["_raw_articles_estimate"]
+    batch_size = counts["_ai_batch_size"]
     runs_gem_day = _QUOTA_GEMINI_FLASH_PER_DAY // max(nb_b, 1)
-    if nb_b > _QUOTA_GEMINI_FLASH_PER_DAY:
-        status_ai = "[yellow]⚠ cascade[/yellow]"
+    # Seuils : <=20 = OK pur Flash 2.5 ; 20-80 = cascade (informatif) ; >80 = ATTENTION
+    if nb_b > 80:
+        status_ai = "[red]✘ ATTENTION[/red]"
         issues.append(
-            f"Gemini Flash 2.5 : {nb_b} batches > {_QUOTA_GEMINI_FLASH_PER_DAY} req/jour. "
-            "La cascade va automatiquement basculer sur d'autres modèles "
-            "(2.5-flash-lite, 2.5-pro, etc.) — pas de blocage mais run plus lent."
+            f"Gemini : {nb_b} batches risque de saturer la cascade entiere "
+            "(Flash + Lite + Pro + Gemma cumulent ~80 req/jour free tier). "
+            "Reduis les cibles ou augmente AI_BATCH_SIZE."
         )
+    elif nb_b > _QUOTA_GEMINI_FLASH_PER_DAY:
+        status_ai = "[yellow]⚠ cascade[/yellow]"
     else:
         status_ai = "[green]✓ OK[/green]"
     t.add_row("Gemini Flash 2.5", f"~{nb_b} batches",
-              f"{_QUOTA_GEMINI_FLASH_PER_DAY}/jour (free)",
+              f"{_QUOTA_GEMINI_FLASH_PER_DAY}/jour (cascade ~80)",
               f"~{runs_gem_day}/jour", status_ai)
 
     console.print(t)
+    console.print(
+        f"  [dim]ℹ Estimation Gemini : ~{raw_est} articles bruts collectes × 70% "
+        f"(apres dedup) ÷ AI_BATCH_SIZE={batch_size} = ~{nb_b} batches.[/dim]\n"
+    )
 
     if issues:
         warn_body = "  [yellow bold]⚠ Avertissements detectes :[/yellow bold]\n\n"
