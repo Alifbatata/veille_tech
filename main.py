@@ -253,6 +253,20 @@ def _interactive_pre_run() -> int | None:
             console.print("[yellow]↩ Retour a l'etape 3 (cibles)…[/yellow]\n")
             continue
 
+        # ----- Verification quotas API -----
+        try:
+            with open(os.path.join(DATA_DIR, "targets.json"), encoding="utf-8") as f:
+                _t = json.load(f)
+            _nc = len(_t.get("companies", []))
+            _nk = len(_t.get("keywords", []))
+            _ns = len(_t.get("solo_keywords", []))
+        except (OSError, json.JSONDecodeError):
+            _nc = _nk = _ns = 0
+        console.print()
+        if not _check_quotas_panel(console, Table, Panel, Confirm, _nc, _nk, _ns, nb):
+            console.print("[yellow]↩ Retour a l'etape 3 (cibles) pour reduire le volume…[/yellow]\n")
+            continue
+
         # ----- Recap final + confirmation -----
         if _show_recap_and_confirm(console, Panel, Confirm, nb):
             return nb
@@ -451,6 +465,52 @@ def _check_hour_warning(console, Confirm, Panel, Text) -> None:
     console.print()
 
 
+# =============================================================================
+# Quotas API (verification pre-run)
+# =============================================================================
+# Limites connues — verifiees 2026 sur les pages de tarification officielles.
+# Tavily et Gemini Flash sont les seules a avoir un quota DUR (free tier).
+# Google News n'a pas de quota officiel mais le seuil ~500 req/run protege
+# contre les bans IP comportementaux (le code applique deja un break/30 req).
+_QUOTA_TAVILY_PER_MONTH      = 1000
+_QUOTA_GEMINI_FLASH_PER_DAY  = 20
+_QUOTA_GNEWS_SOFT_PER_RUN    = 500   # soft, anti-ban
+_QUOTA_GNEWS_DANGER_PER_RUN  = 700   # rouge au-dela
+_QUOTA_TAVILY_PER_RUN_WARN   = 200   # 1000/mois ÷ 5 runs/mois ≈ 200
+
+
+def _compute_request_counts(
+    nb_companies: int, nb_keywords: int, nb_solos: int, nb_per_source: int
+) -> dict[str, int]:
+    """Estime le nombre de requetes par source pour CE run.
+
+    Le mapping refletre exactement ce que les build_*_queries() produisent
+    dans scraper.py + le pipeline d'IA filter (batchs de 30 articles).
+    """
+    nb_q_gnews = nb_companies * nb_keywords + nb_solos
+
+    # Estimation grossiere des articles BRUTS collectes (pour Gemini batches)
+    raw_articles = (
+        nb_per_source * 5      # 5 flux RSS
+        + 100                  # ~20 articles × 5 sources thematiques + autres
+        + nb_q_gnews * 8       # ~8 articles par requete GNews moyenne
+    )
+    # Apres dedup ~70%, batchs de 30 articles
+    nb_batches = max(3, int(raw_articles * 0.7 / 30))
+
+    return {
+        "RSS":              5,
+        "arXiv search":     5 + nb_solos,
+        "OpenAlex":         6 + nb_solos,
+        "Crossref":         5 + nb_solos,
+        "HAL":              5 + nb_solos,
+        "Semantic Scholar": 4 + nb_solos,
+        "Tavily":           4 + nb_solos,
+        "Google News":      nb_q_gnews,
+        "Gemini Flash":     nb_batches,
+    }
+
+
 def _estimate_run_duration_h(nb_per_source: int, nb_q: int) -> tuple[float, float]:
     """Estimation de la duree totale du run (GNews + RSS + IA + autres).
 
@@ -487,6 +547,123 @@ def _estimate_run_duration_h(nb_per_source: int, nb_q: int) -> tuple[float, floa
     aux_h = (rss_min + ai_min + autres_min) / 60.0
 
     return gnews_h, aux_h
+
+
+def _check_quotas_panel(
+    console, Table, Panel, Confirm,
+    nb_companies: int, nb_keywords: int, nb_solos: int, nb_per_source: int,
+) -> bool:
+    """Verifie les quotas API pour le run prevu et affiche un tableau pedagogique.
+
+    Calcule les requetes prevues par source, les compare aux limites connues
+    (Tavily 1000/mois, Gemini Flash 20/jour, GNews soft ~500/run), affiche
+    un tableau colore (vert/jaune/rouge) et propose a l'utilisateur de
+    revenir corriger si une limite est depassee.
+
+    Returns:
+        True si l'utilisateur veut continuer, False pour revenir aux cibles.
+    """
+    counts = _compute_request_counts(nb_companies, nb_keywords, nb_solos, nb_per_source)
+
+    t = Table(
+        title="🔒  Verification des quotas API pour CE run",
+        border_style="cyan", show_lines=False,
+    )
+    t.add_column("Source", style="bold")
+    t.add_column("Req / run", justify="right", style="cyan")
+    t.add_column("Quota officiel", style="dim")
+    t.add_column("Runs max possibles", justify="right")
+    t.add_column("Statut", justify="center")
+
+    issues: list[str] = []
+
+    # Sources sans quota dur — toujours OK pour des cibles raisonnables
+    for src in ("RSS", "arXiv search", "OpenAlex", "Crossref", "HAL", "Semantic Scholar"):
+        t.add_row(src, str(counts[src]), "illimite (gratuit)", "[dim]∞[/dim]", "[green]✓ OK[/green]")
+
+    # Tavily — quota DUR mensuel
+    tavily = counts["Tavily"]
+    runs_tavily_month = _QUOTA_TAVILY_PER_MONTH // max(tavily, 1)
+    if tavily >= _QUOTA_TAVILY_PER_RUN_WARN:
+        status_t = "[red]✘ ATTENTION[/red]"
+        issues.append(
+            f"Tavily : {tavily} req/run × 5 runs/mois = {tavily * 5} > "
+            f"{_QUOTA_TAVILY_PER_MONTH} (free tier). Tu vas brûler ton quota mensuel."
+        )
+    elif tavily >= _QUOTA_TAVILY_PER_RUN_WARN // 2:
+        status_t = "[yellow]⚠ tendu[/yellow]"
+    else:
+        status_t = "[green]✓ OK[/green]"
+    t.add_row("Tavily", str(tavily), f"{_QUOTA_TAVILY_PER_MONTH}/mois (free)",
+              f"{runs_tavily_month}/mois", status_t)
+
+    # Google News — quota SOFT par run (anti-ban IP)
+    gnews = counts["Google News"]
+    if gnews >= _QUOTA_GNEWS_DANGER_PER_RUN:
+        status_g = "[red]✘ RISQUE[/red]"
+        issues.append(
+            f"Google News : {gnews} req/run dépasse {_QUOTA_GNEWS_DANGER_PER_RUN} — "
+            "risque sérieux de ban IP temporaire. Réduis les cibles."
+        )
+    elif gnews >= _QUOTA_GNEWS_SOFT_PER_RUN:
+        status_g = "[yellow]⚠ tendu[/yellow]"
+        issues.append(
+            f"Google News : {gnews} req/run au-dessus du seuil prudentiel "
+            f"({_QUOTA_GNEWS_SOFT_PER_RUN}). Le code applique des breaks mais "
+            "reste prudent."
+        )
+    else:
+        status_g = "[green]✓ OK[/green]"
+    t.add_row("Google News", str(gnews), f"~{_QUOTA_GNEWS_SOFT_PER_RUN}/run (soft)",
+              f"~{_QUOTA_GNEWS_SOFT_PER_RUN // max(gnews, 1)}/run", status_g)
+
+    # Gemini Flash 2.5 — quota DUR journalier
+    nb_b = counts["Gemini Flash"]
+    runs_gem_day = _QUOTA_GEMINI_FLASH_PER_DAY // max(nb_b, 1)
+    if nb_b > _QUOTA_GEMINI_FLASH_PER_DAY:
+        status_ai = "[yellow]⚠ cascade[/yellow]"
+        issues.append(
+            f"Gemini Flash 2.5 : {nb_b} batches > {_QUOTA_GEMINI_FLASH_PER_DAY} req/jour. "
+            "La cascade va automatiquement basculer sur d'autres modèles "
+            "(2.5-flash-lite, 2.5-pro, etc.) — pas de blocage mais run plus lent."
+        )
+    else:
+        status_ai = "[green]✓ OK[/green]"
+    t.add_row("Gemini Flash 2.5", f"~{nb_b} batches",
+              f"{_QUOTA_GEMINI_FLASH_PER_DAY}/jour (free)",
+              f"~{runs_gem_day}/jour", status_ai)
+
+    console.print(t)
+
+    if issues:
+        warn_body = "  [yellow bold]⚠ Avertissements detectes :[/yellow bold]\n\n"
+        for i, issue in enumerate(issues, 1):
+            warn_body += f"     [bold]{i}.[/bold] {issue}\n"
+        warn_body += (
+            "\n  [bold]Que peux-tu faire pour corriger ?[/bold]\n"
+            "     • [cyan]Reduire les entreprises ou mots-cles couples[/cyan] "
+            "→ baisse Google News (multiplicatif)\n"
+            "     • [cyan]Reduire les solo_keywords[/cyan] → baisse Tavily, GNews "
+            "et toutes les sources thematiques\n"
+            "     • [cyan]Lancer le programme moins souvent[/cyan] (ex: 1×/quinzaine "
+            "au lieu de 1×/semaine) → laisse les quotas se reconstituer"
+        )
+        console.print(Panel(warn_body, border_style="yellow", padding=(1, 2)))
+        console.print()
+        if not Confirm.ask(
+            "  [bold]Continuer malgre ces avertissements ?[/bold]\n"
+            "  [dim]Tape [bold]y[/bold] pour continuer (j'assume), "
+            "ou [bold]n[/bold] pour revenir aux cibles et corriger.\n"
+            "  Entree seul = [bold]n (non, revenir)[/bold] par defaut.[/dim]",
+            default=False,
+        ):
+            return False
+    else:
+        console.print(
+            "  [green]✓ Tous les quotas sont respectes pour ce run.[/green]\n"
+        )
+
+    return True
 
 
 def _format_duration(h: float) -> str:
