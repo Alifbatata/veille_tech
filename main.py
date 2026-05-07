@@ -776,17 +776,30 @@ def _show_targets(console, Table, Panel, targets_dict: dict | None = None) -> No
             t3.add_row(str(i), k)
     console.print(t3)
 
-    # Recommandations
+    # Recommandations — on marque dynamiquement la ligne correspondant a ta config
+    # actuelle (basee sur nb_q = entreprises × mots-cles + solos).
+    if nb_q == 0:
+        tier = -1
+    elif nb_q < 100:
+        tier = 0
+    elif nb_q < 200:
+        tier = 1
+    elif nb_q < 400:
+        tier = 2
+    else:
+        tier = 3
+    actuel = " [bold yellow](actuel)[/bold yellow]"
+    marks = [actuel if tier == i else "        " for i in range(4)]
     reco = (
         f"  📊 [bold]Total requetes Google News[/bold] = "
         f"({len(companies)} × {len(keywords)}) + {len(solo_keywords)} solo = "
         f"[bold cyan]{nb_q}[/bold cyan] requetes\n"
         f"  ⏱  [bold]Duree GNews estimee[/bold] : [yellow]{dur_est}[/yellow]\n\n"
-        f"  💡 [bold]Recommandations[/bold] :\n"
-        f"     • [green]5-10 entreprises × 5-7 mots-cles[/green]    = ~25-70 req     (1-3h, pour test)\n"
-        f"     • [yellow]15 entreprises × 10 mots-cles[/yellow]        = ~150 req       (6-10h, hebdo classique)\n"
-        f"     • [cyan]21 entreprises × 14 mots-cles[/cyan] (actuel) = ~294 req       (18-22h, weekend marathon)\n"
-        f"     • [red]>30 entreprises × >15 mots-cles[/red]         = >450 req       (>30h, deconseille)\n\n"
+        f"  💡 [bold]Recommandations[/bold] (la ligne marquee [bold yellow](actuel)[/bold yellow] reflete ta config) :\n"
+        f"     • [green]5-10 entreprises × 5-7 mots-cles[/green]   = ~25-70 req{marks[0]}  (1-3h, pour test)\n"
+        f"     • [yellow]15 entreprises × 10 mots-cles[/yellow]       = ~150 req{marks[1]}    (6-10h, hebdo classique)\n"
+        f"     • [cyan]21 entreprises × 14 mots-cles[/cyan]        = ~294 req{marks[2]}    (18-22h, weekend marathon)\n"
+        f"     • [red]>30 entreprises × >15 mots-cles[/red]        = >450 req{marks[3]}    (>30h, deconseille)\n\n"
         f"  💡 [bold]A propos des mots-cles SOLO[/bold] :\n"
         f"     Chaque solo ajoute 1 requete GNews mais aussi 1 requete sur arXiv,\n"
         f"     OpenAlex, Crossref, HAL, Semantic Scholar et Tavily. Reserve ce champ\n"
