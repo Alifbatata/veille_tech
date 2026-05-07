@@ -470,9 +470,10 @@ def _show_targets(console, Table, Panel, targets_dict: dict | None = None) -> No
         with open(targets_path, encoding="utf-8") as f:
             targets = json.load(f)
         is_live = False
-    companies = targets.get("companies", [])
-    keywords = targets.get("keywords", [])
-    solo_keywords = targets.get("solo_keywords", [])
+    # Tri alphabetique (insensible a la casse) pour reperer rapidement les doublons
+    companies = sorted(targets.get("companies", []), key=str.lower)
+    keywords = sorted(targets.get("keywords", []), key=str.lower)
+    solo_keywords = sorted(targets.get("solo_keywords", []), key=str.lower)
 
     # Nombre total de requetes GNews = (entreprises × mots-cles couples) + solos
     nb_q = len(companies) * len(keywords) + len(solo_keywords)
@@ -544,14 +545,18 @@ def _show_targets(console, Table, Panel, targets_dict: dict | None = None) -> No
 
 def _print_mini_list(console, Table, label: str, items: list[str], color: str) -> None:
     """Affiche une mini-liste numerotee des items courants — utilisee apres chaque
-    modification pour donner un retour visuel immediat de l'etat in-memory."""
+    modification pour donner un retour visuel immediat de l'etat in-memory.
+
+    Tri alphabetique (insensible a la casse) pour reperer rapidement un doublon.
+    """
     if not items:
         console.print(f"  [dim]({label} : liste vide)[/dim]")
         return
-    t = Table(title=f"{label} ({len(items)})", border_style=color, show_header=False, expand=False)
+    items_sorted = sorted(items, key=str.lower)
+    t = Table(title=f"{label} ({len(items_sorted)})", border_style=color, show_header=False, expand=False)
     t.add_column("#", style="dim", justify="right", width=4)
     t.add_column("Valeur", style=color)
-    for i, item in enumerate(items, 1):
+    for i, item in enumerate(items_sorted, 1):
         t.add_row(str(i), item)
     console.print(t)
 
@@ -570,11 +575,13 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
     targets_path = os.path.join(DATA_DIR, "targets.json")
     with open(targets_path, encoding="utf-8") as f:
         targets_disk = json.load(f)
-    # Copie de travail in-memory (modifs uniquement persistees sur action 8)
+    # Copie de travail in-memory (modifs uniquement persistees sur action 8).
+    # Tri alphabetique : ainsi l'index affiche correspond toujours a l'index
+    # interne, et les suppressions par numero ciblent le bon item.
     targets = {
-        "companies":     list(targets_disk.get("companies", [])),
-        "keywords":      list(targets_disk.get("keywords", [])),
-        "solo_keywords": list(targets_disk.get("solo_keywords", [])),
+        "companies":     sorted(targets_disk.get("companies", []), key=str.lower),
+        "keywords":      sorted(targets_disk.get("keywords", []), key=str.lower),
+        "solo_keywords": sorted(targets_disk.get("solo_keywords", []), key=str.lower),
     }
 
     while True:
@@ -604,6 +611,7 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
                              "[dim](respecte la casse)[/dim]").strip()
             if new and new not in targets["companies"]:
                 targets["companies"].append(new)
+                targets["companies"].sort(key=str.lower)
                 console.print(f"\n  [green]✓ Ajoute : '{new}'[/green]")
                 console.print("  [dim]Liste a jour ci-dessous (verifie l'orthographe) :[/dim]")
                 _print_mini_list(console, Table, "🏢  Entreprises", targets["companies"], "cyan")
@@ -629,6 +637,7 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
                              "[dim](ex: plasma deposition)[/dim]").strip()
             if new and new not in targets["keywords"]:
                 targets["keywords"].append(new)
+                targets["keywords"].sort(key=str.lower)
                 console.print(f"\n  [green]✓ Ajoute : '{new}'[/green]")
                 console.print("  [dim]Liste a jour ci-dessous (verifie l'orthographe) :[/dim]")
                 _print_mini_list(console, Table, "🔑  Mots-cles couples", targets["keywords"], "green")
@@ -670,6 +679,7 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
                         console.print("  [dim]↩ Annule, rien ajoute.[/dim]")
                         continue
                 targets["solo_keywords"].append(new)
+                targets["solo_keywords"].sort(key=str.lower)
                 console.print(f"\n  [green]✓ Solo ajoute : '{new}'[/green]")
                 console.print("  [dim]Liste a jour ci-dessous (verifie l'orthographe) :[/dim]")
                 _print_mini_list(console, Table, "🎯  Mots-cles SOLO", targets["solo_keywords"], "magenta")
@@ -695,6 +705,11 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
             _show_targets(console, Table, Panel, targets_dict=targets)
             continue
         elif action == "8":
+            # Tri alphabetique avant ecriture (le in-memory est deja trie, mais
+            # filet de securite au cas ou un append aurait oublie le sort).
+            targets["companies"].sort(key=str.lower)
+            targets["keywords"].sort(key=str.lower)
+            targets["solo_keywords"].sort(key=str.lower)
             with open(targets_path, "w", encoding="utf-8") as f:
                 json.dump(targets, f, ensure_ascii=False, indent=2)
             console.print(Panel(
