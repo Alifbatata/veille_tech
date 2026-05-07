@@ -956,6 +956,112 @@ def fetch_broad_web_search(query: str, max_results: int = 10) -> list[dict[str, 
     return articles
 
 
+# =============================================================================
+# Google Patents — brevets industriels (PVD/CVD/ALD massivement protégés)
+# =============================================================================
+
+def build_patents_queries() -> list[str]:
+    """Construit des requêtes pour Google Patents.
+
+    WHY Patents : la R&D PVD/CVD/ALD industrielle se publie d'abord en brevets
+    (Applied Materials, ASM International, Veeco, Picosun, Oerlikon, Lam Research,
+    KLA, Tokyo Electron déposent des centaines de brevets par an). Ces innovations
+    n'apparaissent souvent ni dans la presse (pas de communiqué) ni dans les
+    papers académiques (R&D propriétaire). Patents = SEULE source pour ce signal.
+
+    Format : phrases entre guillemets, comme arXiv/HAL. Google Patents cherche
+    par défaut dans titre + abstract + claims, pas besoin d'opérateurs spéciaux.
+    """
+    if not KEYWORDS and not SOLO_KEYWORDS:
+        return []
+    base = [
+        '"physical vapor deposition"',
+        '"chemical vapor deposition"',
+        '"atomic layer deposition"',
+        '"magnetron sputtering"',
+        '"HiPIMS"',
+        '"thin film coating"',
+        '"hard coating"',
+        '"diamond-like carbon"',  # central en brevets DLC
+    ]
+    kw_q   = [f'"{kw}"' for kw in (KEYWORDS or [])]
+    solo_q = [f'"{kw}"' for kw in (SOLO_KEYWORDS or [])]
+    return list(dict.fromkeys(base + kw_q + solo_q))
+
+
+def fetch_google_patents(query: str, max_results: int = 15) -> list[dict[str, Any]]:
+    """Interroge Google Patents via l'endpoint xhr/query (gratuit, sans clé).
+
+    Endpoint : https://patents.google.com/xhr/query?url=q%3D...&exp=
+    Filtre par date de priorité avec RECENT_DAYS_LIMIT pour exclure les brevets
+    anciens. Limite par défaut à 15 résultats / requête (suffisant après dedup).
+
+    Robuste : si Google bloque (403/429) ou change le format JSON, retourne []
+    sans crash et marque le domaine en cooldown.
+
+    Args:
+        query: requête en phrase (ex: '"physical vapor deposition"').
+        max_results: borne supérieure de résultats par requête.
+
+    Returns:
+        Liste d'articles unifiés (catégorie 'patent'). Vide en cas d'erreur.
+    """
+    from datetime import timedelta
+    cutoff_date = (datetime.now(timezone.utc) - timedelta(days=RECENT_DAYS_LIMIT)).strftime("%Y%m%d")
+
+    # Querystring INTERNE (à URL-encoder dans le paramètre 'url=')
+    inner = f"q={query}&num={max_results}&after=priority:{cutoff_date}&language=ENGLISH"
+    url = f"https://patents.google.com/xhr/query?url={quote_plus(inner)}&exp="
+
+    _respect_domain_cooldown(url)
+    session = _get_session()
+    try:
+        response = session.get(
+            url, timeout=20,
+            headers={"Accept": "application/json", "Referer": "https://patents.google.com/"},
+        )
+        if response.status_code in (403, 429):
+            _record_block(url, base_seconds=180.0)
+            logger.warning(f"🚫 Google Patents : statut HTTP {response.status_code}")
+            return []
+        response.raise_for_status()
+    except (RequestsError, OSError) as exc:
+        logger.warning(f"❌ Google Patents : erreur réseau pour « {query[:60]}... » : {exc}")
+        return []
+
+    try:
+        data = response.json()
+    except (ValueError, json.JSONDecodeError) as exc:
+        logger.warning(f"❌ Google Patents : réponse non-JSON ({exc})")
+        return []
+
+    # Structure attendue : results.cluster[*].result[*].patent.{...}
+    clusters = (data.get("results") or {}).get("cluster") or []
+    articles: list[dict[str, Any]] = []
+    for cluster in clusters:
+        for item in (cluster.get("result") or []):
+            patent = item.get("patent") or {}
+            pub_num = (patent.get("publication_number") or "").strip()
+            title   = (patent.get("title") or "").strip()
+            if not pub_num or not title:
+                continue
+            snippet  = (patent.get("snippet") or "").strip()[:600]
+            assignee = (patent.get("assignee") or "").strip()
+            summary  = snippet
+            if assignee:
+                summary = f"{snippet} [Déposant : {assignee}]" if snippet else f"Déposant : {assignee}"
+            articles.append({
+                "title":        title,
+                "link":         f"https://patents.google.com/patent/{pub_num}/en",
+                "summary":      summary,
+                "source":       f"Google Patents — {assignee or pub_num}",
+                "category":     "patent",
+                "collected_at": datetime.now(timezone.utc).isoformat(),
+            })
+    logger.info(f"   └─ Google Patents : {len(articles)} brevet(s) pour « {query[:60]}... »")
+    return articles
+
+
 def fetch_google_news(query: str) -> list[dict[str, Any]] | None:
     # Rotation de locale (hl/gl/ceid) pour varier le profil vu par Google
     hl, gl, ceid = random.choice(_GNEWS_LOCALES)
@@ -1096,6 +1202,7 @@ def run_scraper(
     include_hal:               bool = True,    # ON : gratuit, sans clé, fort sur sources FR (CEA/CNRS/ONERA)
     include_semantic_scholar:  bool = True,    # ON : gratuit (rate-limit 1 r/s sans clé), ~200M papers
     include_web:               bool = False,   # OFF : nécessite TAVILY_API_KEY
+    include_patents:           bool = True,    # ON : gratuit, sans clé, brevets industriels PVD/CVD/ALD
     apply_filter:              bool = True,
 ) -> dict[str, Any]:
     all_articles: list[dict[str, Any]] = []
@@ -1185,6 +1292,19 @@ def run_scraper(
             if idx < len(web_queries):
                 time.sleep(max(5.0, random.gauss(10.0, 3.0)))
         _executed_blocks.append("Tavily")
+
+    if include_patents:
+        _maybe_inter_source_pause("Patents")
+        pat_queries = build_patents_queries()
+        logger.info(f"📜 Lancement Google Patents : {len(pat_queries)} requêtes thématiques.")
+        for idx, q in enumerate(pat_queries, 1):
+            logger.info(f"📜 Google Patents [{idx}/{len(pat_queries)}] : « {q[:80]}... »")
+            all_articles.extend(fetch_google_patents(q))
+            # Pause inter-requête : Patents tolère bien plus que GNews mais
+            # on reste poli (8-15s) pour éviter ban IP comportemental.
+            if idx < len(pat_queries):
+                time.sleep(max(6.0, random.gauss(10.0, 3.0)))
+        _executed_blocks.append("Patents")
 
     if include_gnews:
         _maybe_inter_source_pause("GoogleNews")

@@ -183,7 +183,7 @@ def _interactive_pre_run() -> int | None:
     # ----- Banner d'accueil -----
     title = Text()
     title.append("\n  🛰️  VEILLE TECHNOLOGIQUE\n", style="bold cyan")
-    title.append("  Pipeline complet : RSS + arXiv + OpenAlex + Crossref + HAL + SS + Tavily + Google News + IA",
+    title.append("  Pipeline : RSS + arXiv + OpenAlex + Crossref + HAL + SS + Tavily + Patents + GNews + IA",
                  style="dim cyan")
     console.print(Panel(Align.center(title), border_style="cyan", padding=(1, 2)))
     console.print()
@@ -516,6 +516,7 @@ def _compute_request_counts(
         "HAL":              6 + nb_keywords + nb_solos,   # 6 base bilingues
         "Semantic Scholar": 7 + nb_keywords + nb_solos,   # 7 base apres split
         "Tavily":           4 + nb_keywords + nb_solos,
+        "Google Patents":   8 + nb_keywords + nb_solos,   # 8 base + broadcast
         "Google News":      nb_q_gnews,
         "Gemini Flash":     nb_batches,
         # Donnees de transparence (pas affichees comme requetes mais utiles pour
@@ -592,7 +593,8 @@ def _check_quotas_panel(
     issues: list[str] = []
 
     # Sources sans quota dur — toujours OK pour des cibles raisonnables
-    for src in ("RSS", "arXiv search", "OpenAlex", "Crossref", "HAL", "Semantic Scholar"):
+    for src in ("RSS", "arXiv search", "OpenAlex", "Crossref", "HAL",
+                "Semantic Scholar", "Google Patents"):
         t.add_row(src, str(counts[src]), "illimite (gratuit)", "[dim]∞[/dim]", "[green]✓ OK[/green]")
 
     # Tavily — quota DUR mensuel
@@ -1143,7 +1145,7 @@ def _show_recap_and_confirm(console, Panel, Confirm, nb_articles: int) -> bool:
         f"[dim]({nb_companies}×{nb_keywords} + {nb_solo} solo)[/dim]\n"
         f"  [bold]🧠  Memoire :[/bold] [cyan]{mem_label}[/cyan]\n"
         f"\n  [dim]Si tout est correct, le programme va demarrer le pipeline complet "
-        f"(RSS + arXiv + OpenAlex + Crossref + HAL + Semantic Scholar + Tavily + Google News + IA + email).[/dim]"
+        f"(RSS + arXiv + OpenAlex + Crossref + HAL + Semantic Scholar + Tavily + Google Patents + Google News + IA + email).[/dim]"
     )
     console.print(Panel(summary, title="📋  Recapitulatif final",
                         border_style="green", padding=(1, 2)))
