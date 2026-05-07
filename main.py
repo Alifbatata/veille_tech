@@ -451,6 +451,55 @@ def _check_hour_warning(console, Confirm, Panel, Text) -> None:
     console.print()
 
 
+def _estimate_run_duration_h(nb_per_source: int, nb_q: int) -> tuple[float, float]:
+    """Estimation de la duree totale du run (GNews + RSS + IA + autres).
+
+    Calibrage empirique :
+    - GNews (dominant) : delais inter-requete `_humanlike_inter_request_delay`
+      (mix fast/normal/slow/very_slow, moyenne ~137s) + long break ~10 min
+      toutes les 30 requetes + pause circadienne 4-6h apres 6h de run.
+    - RSS + arXiv search + OpenAlex + Crossref + HAL + S2 + Tavily + IA filter :
+      contribution mineure (quelques minutes), proportionnelle au volume RSS.
+
+    Returns:
+        (gnews_h, aux_h) : duree GNews et duree des sources auxiliaires en heures.
+        Le total = gnews_h + aux_h.
+    """
+    # GNews — formule progressive (le coefficient augmente avec nb_q car les
+    # breaks toutes les 30 req s'amortissent moins bien sur les gros volumes).
+    if nb_q == 0:
+        gnews_h = 0.0
+    elif nb_q < 50:
+        gnews_h = nb_q * 0.04
+    elif nb_q < 150:
+        gnews_h = nb_q * 0.045
+    elif nb_q < 300:
+        gnews_h = nb_q * 0.05 + 5.0  # +5h pause circadienne (run > 6h)
+    else:
+        gnews_h = nb_q * 0.055 + 5.0
+
+    # Sources auxiliaires : 5 RSS + ~30 requetes thematiques + IA filter
+    # IA : ~0.5 min par batch de 30 articles, articles bruts ~ nb_per_source*5 + 100
+    raw_articles = nb_per_source * 5 + 100
+    ai_min = (raw_articles * 0.7 / 30) * 0.5
+    rss_min = 1.0 + nb_per_source * 0.02      # ~1 min base + scaling RSS
+    autres_min = 5.0                          # arXiv search + OpenAlex + ...
+    aux_h = (rss_min + ai_min + autres_min) / 60.0
+
+    return gnews_h, aux_h
+
+
+def _format_duration(h: float) -> str:
+    """Formate une duree en heures sous forme '~X min' ou '~Xh' / '~X.Yh'."""
+    if h <= 0:
+        return "—"
+    if h < 1.0:
+        return f"~{int(round(h * 60))} min"
+    if h < 10.0:
+        return f"~{h:.1f}h"
+    return f"~{int(round(h))}h"
+
+
 def _show_targets(console, Table, Panel, targets_dict: dict | None = None) -> None:
     """Affiche les entreprises et mots-cles courants avec recommandations volume.
 
@@ -477,17 +526,22 @@ def _show_targets(console, Table, Panel, targets_dict: dict | None = None) -> No
 
     # Nombre total de requetes GNews = (entreprises × mots-cles couples) + solos
     nb_q = len(companies) * len(keywords) + len(solo_keywords)
-    # Estimation duree GNews (~141s/req moyen + circadien 5h pour gros runs)
+    # Duree GNews seule (volume dominant). On suppose un volume RSS Standard (50)
+    # pour cette estimation a vue d'oeil ; le volume reel est choisi a l'etape
+    # suivante par _choose_volume.
+    gnews_h, aux_h_default = _estimate_run_duration_h(nb_per_source=50, nb_q=nb_q)
     if nb_q == 0:
         dur_est = "0 (aucune cible)"
-    elif nb_q < 50:
-        dur_est = f"~{nb_q * 0.04:.1f}h (court)"
-    elif nb_q < 150:
-        dur_est = f"~{nb_q * 0.045:.1f}h (modere)"
-    elif nb_q < 300:
-        dur_est = f"~{(nb_q * 0.05) + 5:.1f}h (long, avec pause nuit)"
     else:
-        dur_est = f"~{(nb_q * 0.055) + 5:.1f}h (TRES long)"
+        if nb_q < 50:
+            note = "(court)"
+        elif nb_q < 150:
+            note = "(modere)"
+        elif nb_q < 300:
+            note = "(long, avec pause circadienne ~5h)"
+        else:
+            note = "(TRES long, avec pause circadienne ~5h)"
+        dur_est = f"{_format_duration(gnews_h + aux_h_default)} {note}"
 
     live_suffix = " [yellow](non encore sauvegarde)[/yellow]" if is_live else ""
 
@@ -761,31 +815,69 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
 def _choose_volume(console, Table, Panel, Prompt, IntPrompt) -> int | None:
     """Affiche les 5 presets de volume RSS et retourne le choix utilisateur.
 
+    Les durees sont calculees dynamiquement a partir des cibles courantes
+    (entreprises × mots-cles + solo) pour refleter la duree REELLE du run.
+
     Retourne None si l'utilisateur veut revenir a l'etape precedente (touche r/p).
     """
-    presets = [
-        ("1", "🚀  Test rapide",       25,  "~5 min", "Pour valider que tout fonctionne avant un vrai run."),
-        ("2", "📰  Standard hebdo",    50,  "~3-4h",  "Usage normal hebdomadaire. Suffisant si tu lances chaque semaine."),
-        ("3", "📚  Approfondi",       100,  "~8-10h", "Plus de couverture. Bon compromis si tu lances tous les 15 jours."),
-        ("4", "🏆  Marathon weekend", 200,  "~18-22h", "Couverture maximale. Recommande si tu lances 1x/mois ou apres une longue pause."),
-        ("5", "✏️   Personnalise",      0,  "?",      "Tu choisis le nombre toi-meme."),
+    # Lire les cibles pour calculer le nombre de requetes GNews
+    targets_path = os.path.join(DATA_DIR, "targets.json")
+    nb_q = 0
+    try:
+        with open(targets_path, encoding="utf-8") as f:
+            t = json.load(f)
+        nb_q = (
+            len(t.get("companies", [])) * len(t.get("keywords", []))
+            + len(t.get("solo_keywords", []))
+        )
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    presets_def = [
+        ("1", "🚀  Test rapide",        25,  "Pour valider que tout fonctionne avant un vrai run."),
+        ("2", "📰  Standard hebdo",     50,  "Usage normal hebdomadaire. Suffisant si tu lances chaque semaine."),
+        ("3", "📚  Approfondi",        100,  "Plus de couverture. Bon compromis si tu lances tous les 15 jours."),
+        ("4", "🏆  Marathon weekend",  200,  "Couverture maximale. Recommande si tu lances 1x/mois ou apres une longue pause."),
+        ("5", "✏️   Personnalise",       0,  "Tu choisis le nombre toi-meme."),
     ]
+
+    # Pre-calcul GNews (incompressible, identique pour tous les presets)
+    gnews_h, _ = _estimate_run_duration_h(nb_per_source=50, nb_q=nb_q)
+    gnews_label = _format_duration(gnews_h) if nb_q > 0 else "0 (aucune cible)"
+
+    info_panel = (
+        f"  📊 [bold]Tes cibles actuelles[/bold] : "
+        f"[cyan]{nb_q}[/cyan] requetes Google News a faire\n"
+        f"  ⏱  [bold]GNews seul[/bold] (incompressible, identique pour tous les presets) : "
+        f"[bold yellow]{gnews_label}[/bold yellow]\n"
+        f"  💡 [dim]Le preset RSS ci-dessous ne change que de quelques minutes le total — "
+        f"le facteur dominant est le nombre de cibles.[/dim]"
+    )
+    console.print(Panel(info_panel, border_style="yellow", padding=(0, 2)))
+
     table = Table(title="📦  Combien d'articles veux-tu collecter par source RSS ?",
                   border_style="cyan", show_lines=True)
     table.add_column("Numero", style="bold cyan", justify="center")
     table.add_column("Preset", style="bold")
     table.add_column("Articles / source", justify="right", style="green")
-    table.add_column("Duree estimee", justify="center", style="yellow")
+    table.add_column("Duree TOTALE estimee", justify="center", style="yellow")
     table.add_column("Recommande pour")
-    for choice, name, nb, dur, desc in presets:
-        nb_label = str(nb) if nb else "tu choisis"
-        table.add_row(choice, name, nb_label, dur, desc)
+    for choice, name, nb, desc in presets_def:
+        if nb == 0:
+            nb_label = "tu choisis"
+            dur_label = "depend du choix"
+        else:
+            nb_label = str(nb)
+            g_h, a_h = _estimate_run_duration_h(nb_per_source=nb, nb_q=nb_q)
+            dur_label = _format_duration(g_h + a_h)
+        table.add_row(choice, name, nb_label, dur_label, desc)
     console.print(table)
 
     console.print(
-        "\n  [dim]💡 Ce nombre s'applique aux flux RSS (ArXiv, MDPI, IEEE, ScienceDaily). "
-        "Les autres sources (arXiv search, OpenAlex, Crossref, HAL, Tavily, Semantic Scholar, "
-        "Google News) ont leurs volumes propres deja parametres.[/dim]\n"
+        "\n  [dim]💡 Le nombre par source s'applique uniquement aux flux RSS "
+        "(ArXiv, MDPI, IEEE, ScienceDaily). Les autres sources (arXiv search, OpenAlex, "
+        "Crossref, HAL, Tavily, Semantic Scholar, Google News) ont leurs volumes propres "
+        "deja parametres.[/dim]\n"
     )
     console.print(
         "  [bold]Tape le numero du preset que tu veux choisir[/bold] "
