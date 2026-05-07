@@ -340,7 +340,8 @@ def _memory_choice_step(console, Panel, Prompt, Confirm) -> None:
     ))
 
     choice = Prompt.ask(
-        "  [bold]Ton choix[/bold] [dim](Entree = F filtrer)[/dim]",
+        "  [bold]Ton choix[/bold] "
+        "[dim](Entree = [bold green]F[/bold green]iltrer)[/dim]",
         choices=["f", "t", "r", "F", "T", "R"],
         default="f",
         show_choices=False,
@@ -544,21 +545,22 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
 
     while True:
         console.print(Panel(
-            "  [bold]1[/bold]  ➕  Ajouter une entreprise\n"
-            "  [bold]2[/bold]  ➖  Supprimer une entreprise\n"
-            "  [bold]3[/bold]  ➕  Ajouter un mot-cle\n"
-            "  [bold]4[/bold]  ➖  Supprimer un mot-cle\n"
-            "  [bold]5[/bold]  📋  Revoir la liste actuelle (in-memory)\n"
-            "  [bold]6[/bold]  ✅  [green]Sauvegarder et continuer[/green]\n"
-            "  [bold]7[/bold]  ↩  [yellow]Quitter sans sauvegarder[/yellow] (annule toutes les modifs)",
+            "  [bold green]1[/bold green]  ➕  Ajouter une entreprise\n"
+            "  [bold yellow]2[/bold yellow]  ➖  Supprimer une entreprise\n"
+            "  [bold green]3[/bold green]  ➕  Ajouter un mot-cle\n"
+            "  [bold yellow]4[/bold yellow]  ➖  Supprimer un mot-cle\n"
+            "  [bold cyan]5[/bold cyan]  📋  Revoir la liste actuelle (in-memory)\n"
+            "  [bold green]6[/bold green]  ✅  [green]Sauvegarder et continuer[/green]\n"
+            "  [bold yellow]7[/bold yellow]  ↩  [yellow]Quitter sans sauvegarder[/yellow] (annule toutes les modifs)",
             title="✏️  Editer les cibles",
             border_style="yellow",
         ))
         action = Prompt.ask(
             "  [bold]Que veux-tu faire ?[/bold] "
-            "[dim](tape un chiffre de 1 a 7 puis Entree)[/dim]",
+            "[dim](tape 1-7, Entree = [bold green]6[/bold green] sauvegarder)[/dim]",
             choices=["1", "2", "3", "4", "5", "6", "7"],
             default="6",
+            show_default=False,
         )
 
         if action == "1":
@@ -579,7 +581,8 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
                 continue
             _print_mini_list(console, Table, "🏢  Entreprises", targets["companies"], "cyan")
             idx = IntPrompt.ask("  [bold]Numero de l'entreprise a supprimer[/bold] "
-                                "[dim](0 = annuler la suppression)[/dim]", default=0)
+                                "[dim](Entree = [bold cyan]0[/bold cyan] annuler)[/dim]",
+                                default=0, show_default=False)
             if 1 <= idx <= len(targets["companies"]):
                 removed = targets["companies"].pop(idx - 1)
                 console.print(f"\n  [green]✓ Supprime : '{removed}'[/green]")
@@ -603,7 +606,8 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
                 continue
             _print_mini_list(console, Table, "🔑  Mots-cles", targets["keywords"], "green")
             idx = IntPrompt.ask("  [bold]Numero du mot-cle a supprimer[/bold] "
-                                "[dim](0 = annuler la suppression)[/dim]", default=0)
+                                "[dim](Entree = [bold cyan]0[/bold cyan] annuler)[/dim]",
+                                default=0, show_default=False)
             if 1 <= idx <= len(targets["keywords"]):
                 removed = targets["keywords"].pop(idx - 1)
                 console.print(f"\n  [green]✓ Supprime : '{removed}'[/green]")
@@ -688,15 +692,19 @@ def _choose_volume(console, Table, Panel, Prompt, IntPrompt) -> int | None:
         "  [dim magenta]💡 Tape [bold]r[/bold] pour revenir a l'etape precedente "
         "(modifier les cibles).[/dim magenta]"
     )
-    chosen = Prompt.ask("  [bold]Ton choix[/bold]",
-                        choices=["1", "2", "3", "4", "5", "r", "p"],
-                        default="2", show_choices=False)
+    chosen = Prompt.ask(
+        "  [bold]Ton choix[/bold] "
+        "[dim](Entree = [bold green]2[/bold green] Standard hebdo)[/dim]",
+        choices=["1", "2", "3", "4", "5", "r", "p"],
+        default="2", show_choices=False, show_default=False,
+    )
     if chosen in ("r", "p"):
         return None
     if chosen == "5":
         nb = IntPrompt.ask(
-            "  [bold]Nombre d'articles par source[/bold] [dim](entre 5 et 1000)[/dim]",
-            default=50,
+            "  [bold]Nombre d'articles par source[/bold] "
+            "[dim](entre 5 et 1000, Entree = [bold green]50[/bold green])[/dim]",
+            default=50, show_default=False,
         )
         nb = max(5, min(1000, nb))
     else:

@@ -361,42 +361,47 @@ def _ask_field(
         if effective_source != "none":
             actions.append("g")
             if effective_source == "default":
-                label_parts.append("[bold]g[/bold]arder le defaut suggere")
+                label_parts.append("[bold green]g[/bold green]arder le defaut suggere")
             else:
-                label_parts.append("[bold]g[/bold]arder cette valeur")
+                label_parts.append("[bold green]g[/bold green]arder cette valeur")
             actions.append("m")
-            label_parts.append("[bold]m[/bold]odifier")
+            label_parts.append("[bold yellow]m[/bold yellow]odifier")
             actions.append("v")
-            label_parts.append("[bold]v[/bold]oir en clair")
+            label_parts.append("[bold cyan]v[/bold cyan]oir en clair")
         else:
             actions.append("s")
-            label_parts.append("[bold]s[/bold]aisir une valeur")
+            label_parts.append("[bold green]s[/bold green]aisir une valeur")
 
         # 'r' (restaurer) uniquement si la staged differe d'une existing reelle
         staged_differs = has_staged and staged_value != (existing_value or "")
         if staged_differs and has_existing:
             actions.append("r")
-            label_parts.append("[bold]r[/bold]estaurer la valeur .env")
+            label_parts.append("[bold yellow]r[/bold yellow]estaurer la valeur .env")
 
         # 'i' (ignorer) uniquement pour champ optionnel
         if not field.required:
             actions.append("i")
-            label_parts.append("[bold]i[/bold]gnorer (laisser vide)")
+            label_parts.append("[bold cyan]i[/bold cyan]gnorer (laisser vide)")
 
         if can_go_back:
             actions.append("p")
-            label_parts.append("[bold]p[/bold]recedent")
+            label_parts.append("[bold cyan]p[/bold cyan]recedent")
 
         default_choice = "g" if effective_source != "none" else "s"
         default_label = {
             "g": "garder",
             "s": "saisir maintenant",
         }[default_choice]
+        # Premiere lettre coloree DANS le mot (ex: "garder" -> "[g]arder")
+        # Suppression de la redondance "Entree = g garder" -> "Entree = garder"
+        default_label_styled = (
+            f"[bold green]{default_label[0]}[/bold green]{default_label[1:]}"
+        )
 
         console.print("  " + " • ".join(label_parts))
         choice = Prompt.ask(
             f"  [bold]Que veux-tu faire ?[/bold] "
-            f"[dim](Entree = [bold]{default_choice}[/bold] {default_label})[/dim]",
+            f"[dim](Entree = {default_label_styled})[/dim]",
             choices=actions,
             default=default_choice,
             show_choices=False,
