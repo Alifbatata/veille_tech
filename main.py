@@ -1080,8 +1080,8 @@ def _choose_volume(console, Table, Panel, Prompt, IntPrompt) -> int | None:
         )
         nb = max(5, min(1000, nb))
     else:
-        nb = next(p[2] for p in presets if p[0] == chosen)
-        preset_name = next(p[1] for p in presets if p[0] == chosen)
+        nb = next(p[2] for p in presets_def if p[0] == chosen)
+        preset_name = next(p[1] for p in presets_def if p[0] == chosen)
         console.print(f"\n  [green]✓ Selectionne : {preset_name} ({nb} articles/source)[/green]\n")
     return nb
 
