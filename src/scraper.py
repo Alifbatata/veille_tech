@@ -761,12 +761,17 @@ def build_arxiv_search_queries() -> list[str]:
     """
     if not KEYWORDS and not SOLO_KEYWORDS:
         return []
+    # Requetes symetriques : meme terme dans titre ET resume (pas un mot dans
+    # ti et un autre dans abs, ce qui rate les papiers ou le terme n'apparait
+    # que dans un seul des deux champs). Une ligne = un concept.
     base = [
         'ti:"atomic layer deposition" OR abs:"atomic layer deposition"',
         'ti:"physical vapor deposition" OR abs:"physical vapor deposition"',
         'ti:"chemical vapor deposition" OR abs:"chemical vapor deposition"',
-        'ti:"magnetron sputtering" OR abs:HiPIMS',
-        'ti:"thin film coating" OR abs:"hard coating"',
+        'ti:"magnetron sputtering" OR abs:"magnetron sputtering"',
+        'ti:"HiPIMS" OR abs:"HiPIMS"',
+        'ti:"thin film coating" OR abs:"thin film coating"',
+        'ti:"hard coating" OR abs:"hard coating"',
     ]
     # arXiv : recherche dans le titre OU le résumé pour chaque solo
     extra = [f'ti:"{kw}" OR abs:"{kw}"' for kw in (SOLO_KEYWORDS or [])]
