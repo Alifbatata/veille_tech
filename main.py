@@ -507,14 +507,15 @@ def _compute_request_counts(
     # Apres dedup global ~70% retenus, batchs de AI_BATCH_SIZE articles
     nb_batches = max(3, int(raw_articles * 0.7 / ai_batch_size))
 
+    # Sources scientifiques : base hardcodee + broadcast keywords + broadcast solos
     return {
         "RSS":              5,
-        "arXiv search":     5 + nb_solos,
-        "OpenAlex":         6 + nb_solos,
-        "Crossref":         5 + nb_solos,
-        "HAL":              5 + nb_solos,
-        "Semantic Scholar": 4 + nb_solos,
-        "Tavily":           4 + nb_solos,
+        "arXiv search":     7 + nb_keywords + nb_solos,   # 7 base symetriques
+        "OpenAlex":         6 + nb_keywords + nb_solos,
+        "Crossref":         8 + nb_keywords + nb_solos,   # 8 base apres split
+        "HAL":              6 + nb_keywords + nb_solos,   # 6 base bilingues
+        "Semantic Scholar": 7 + nb_keywords + nb_solos,   # 7 base apres split
+        "Tavily":           4 + nb_keywords + nb_solos,
         "Google News":      nb_q_gnews,
         "Gemini Flash":     nb_batches,
         # Donnees de transparence (pas affichees comme requetes mais utiles pour

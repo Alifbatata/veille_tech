@@ -383,8 +383,11 @@ def build_openalex_queries() -> list[str]:
         '"thin film coating" OR "hard coating" OR DLC',
         '"surface treatment" tribology',
     ]
-    extra = [f'"{kw}"' for kw in (SOLO_KEYWORDS or [])]
-    return list(dict.fromkeys(base + extra))
+    # Broadcast : on cherche aussi chaque mot-cle (couple) et chaque solo dans
+    # OpenAlex, pas seulement dans Google News.
+    kw_q   = [f'"{kw}"' for kw in (KEYWORDS or [])]
+    solo_q = [f'"{kw}"' for kw in (SOLO_KEYWORDS or [])]
+    return list(dict.fromkeys(base + kw_q + solo_q))
 
 
 def fetch_openalex_works(query: str, max_results: int = 25) -> list[dict[str, Any]]:
@@ -485,15 +488,22 @@ def build_crossref_queries() -> list[str]:
     """
     if not KEYWORDS and not SOLO_KEYWORDS:
         return []
+    # Single-concept par requete (Crossref AND-narrow les mots multiples,
+    # ce qui ratait les papers ne mentionnant qu'un seul des termes accoles).
     base = [
         "physical vapor deposition",
         "chemical vapor deposition",
         "atomic layer deposition",
-        "magnetron sputtering HiPIMS",
-        "thin film hard coating",
+        "magnetron sputtering",
+        "HiPIMS",
+        "thin film coating",
+        "hard coating",
+        "DLC coating",
     ]
-    extra = list(SOLO_KEYWORDS or [])
-    return list(dict.fromkeys(base + extra))
+    # Broadcast keywords + solos
+    kw_q   = list(KEYWORDS or [])
+    solo_q = list(SOLO_KEYWORDS or [])
+    return list(dict.fromkeys(base + kw_q + solo_q))
 
 
 def fetch_crossref_works(query: str, max_results: int = 20) -> list[dict[str, Any]]:
@@ -577,15 +587,19 @@ def build_hal_queries() -> list[str]:
     """
     if not KEYWORDS and not SOLO_KEYWORDS:
         return []
+    # Paires bilingues FR/EN (HAL est l'archive CNRS, beaucoup de papiers FR)
     base = [
         '"physical vapor deposition" OR "dépôt physique"',
         '"chemical vapor deposition" OR "dépôt chimique"',
         '"atomic layer deposition" OR "dépôt par couche atomique"',
-        'magnetron sputtering OR "pulvérisation magnétron"',
-        '"thin film" OR "couche mince" coating',
+        '"magnetron sputtering" OR "pulvérisation magnétron"',
+        '"thin film coating" OR "couche mince"',
+        '"hard coating" OR "revêtement dur"',
     ]
-    extra = [f'"{kw}"' for kw in (SOLO_KEYWORDS or [])]
-    return list(dict.fromkeys(base + extra))
+    # Broadcast keywords + solos (chacun en phrase exacte)
+    kw_q   = [f'"{kw}"' for kw in (KEYWORDS or [])]
+    solo_q = [f'"{kw}"' for kw in (SOLO_KEYWORDS or [])]
+    return list(dict.fromkeys(base + kw_q + solo_q))
 
 
 def fetch_hal_publications(query: str, max_results: int = 20) -> list[dict[str, Any]]:
@@ -654,14 +668,21 @@ def build_semantic_scholar_queries() -> list[str]:
     """
     if not KEYWORDS and not SOLO_KEYWORDS:
         return []
+    # Single-concept par requete (S2 AND-narrow les mots accoles, ce qui
+    # ratait les papers ne contenant pas TOUS les termes du compose).
     base = [
-        "physical vapor deposition coating",
-        "chemical vapor deposition thin film",
-        "atomic layer deposition precursor",
-        "magnetron sputtering HiPIMS hard coating",
+        "physical vapor deposition",
+        "chemical vapor deposition",
+        "atomic layer deposition",
+        "magnetron sputtering",
+        "HiPIMS",
+        "thin film coating",
+        "hard coating",
     ]
-    extra = list(SOLO_KEYWORDS or [])
-    return list(dict.fromkeys(base + extra))
+    # Broadcast keywords + solos
+    kw_q   = list(KEYWORDS or [])
+    solo_q = list(SOLO_KEYWORDS or [])
+    return list(dict.fromkeys(base + kw_q + solo_q))
 
 
 def fetch_semantic_scholar(query: str, max_results: int = 20) -> list[dict[str, Any]]:
@@ -773,9 +794,11 @@ def build_arxiv_search_queries() -> list[str]:
         'ti:"thin film coating" OR abs:"thin film coating"',
         'ti:"hard coating" OR abs:"hard coating"',
     ]
-    # arXiv : recherche dans le titre OU le résumé pour chaque solo
-    extra = [f'ti:"{kw}" OR abs:"{kw}"' for kw in (SOLO_KEYWORDS or [])]
-    return list(dict.fromkeys(base + extra))
+    # Broadcast : chaque keyword (couple) et chaque solo cherches dans
+    # titre OU resume. Format arXiv : ti:"X" OR abs:"X".
+    kw_q   = [f'ti:"{kw}" OR abs:"{kw}"' for kw in (KEYWORDS or [])]
+    solo_q = [f'ti:"{kw}" OR abs:"{kw}"' for kw in (SOLO_KEYWORDS or [])]
+    return list(dict.fromkeys(base + kw_q + solo_q))
 
 
 def fetch_arxiv_search(query: str, max_results: int = 20) -> list[dict[str, Any]]:
@@ -850,9 +873,11 @@ def build_web_queries() -> list[str]:
         '("thin film" OR "coating" OR "DLC" OR "hard coating") materials science innovation',
         '("surface treatment" OR "tribology" OR "wear resistance") industrial coating research',
     ]
-    # Tavily : phrase exacte + biais académique pour cibler les papers
-    extra = [f'"{kw}" research academic' for kw in (SOLO_KEYWORDS or [])]
-    return list(dict.fromkeys(base + extra))
+    # Broadcast : chaque keyword + solo, en phrase exacte + biais academique
+    # ("research academic" oriente Tavily vers les sources universitaires)
+    kw_q   = [f'"{kw}" research academic' for kw in (KEYWORDS or [])]
+    solo_q = [f'"{kw}" research academic' for kw in (SOLO_KEYWORDS or [])]
+    return list(dict.fromkeys(base + kw_q + solo_q))
 
 
 def fetch_broad_web_search(query: str, max_results: int = 10) -> list[dict[str, Any]]:
