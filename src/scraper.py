@@ -20,9 +20,9 @@ from curl_cffi.requests import RequestsError
 
 # Chargement de la config locale
 try:
-    from config import KEYWORDS, MAX_ARTICLES_PER_SOURCE, SOURCES_RSS, TARGET_COMPANIES, USE_MEMORY, SCRAPE_LIMIT_MONTH, RECENT_DAYS_LIMIT
+    from config import KEYWORDS, MAX_ARTICLES_PER_SOURCE, SOURCES_RSS, TARGET_COMPANIES, USE_MEMORY, SCRAPE_LIMIT_MONTH, RECENT_DAYS_LIMIT, SOLO_KEYWORDS
 except ImportError:
-    from src.config import KEYWORDS, MAX_ARTICLES_PER_SOURCE, SOURCES_RSS, TARGET_COMPANIES, USE_MEMORY, SCRAPE_LIMIT_MONTH, RECENT_DAYS_LIMIT
+    from src.config import KEYWORDS, MAX_ARTICLES_PER_SOURCE, SOURCES_RSS, TARGET_COMPANIES, USE_MEMORY, SCRAPE_LIMIT_MONTH, RECENT_DAYS_LIMIT, SOLO_KEYWORDS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s — %(message)s")
 logger = logging.getLogger("scraper")
@@ -247,23 +247,28 @@ def _warm_up_session(domain_url: str) -> None:
         logger.warning(f"⚠️ Échec du warm-up pour {domain_url}: {e}")
 
 def build_gnews_queries() -> list[str]:
-    """Construit des requêtes unitaires entreprise × mot-clé (produit cartésien).
+    """Construit des requêtes Google News : produit cartésien entreprise × mot-clé,
+    plus les solo_keywords cherchés seuls (sans entreprise associée).
 
     Pas de regroupement OR : Google News tronque silencieusement les longues requêtes
     OR et renvoie systématiquement les mêmes résultats génériques. Une requête courte
     et précise par couple (entreprise, mot-clé) garantit des résultats pertinents et
     bien distincts, au prix d'un nombre d'appels plus élevé (rate-limité ailleurs).
+
+    solo_keywords : phrases multi-mots cherchées TELLES QUELLES (entre guillemets).
+    Utiles pour des thèmes spécifiques qui n'apparaissent jamais avec un nom de société.
     """
     companies = TARGET_COMPANIES or []
     corrected_keywords = [kw.replace("Chemical Layer Deposition", "Chemical Vapor Deposition") for kw in KEYWORDS]
-
-    if not companies or not corrected_keywords:
-        return []
+    solos = SOLO_KEYWORDS or []
 
     queries: list[str] = []
-    for company in companies:
-        for kw in corrected_keywords:
-            queries.append(f'"{company}" "{kw}"')
+    if companies and corrected_keywords:
+        for company in companies:
+            for kw in corrected_keywords:
+                queries.append(f'"{company}" "{kw}"')
+    for kw in solos:
+        queries.append(f'"{kw}"')
 
     return list(dict.fromkeys(queries))
 
@@ -365,10 +370,12 @@ def build_openalex_queries() -> list[str]:
     métadonnées riches (DOI, concepts, institutions). Gratuit, sans clé,
     sans limite de débit pratique pour notre usage. C'est notre meilleure source
     pour rattraper les papers universitaires non syndiqués via RSS.
+
+    Les solo_keywords sont ajoutés en plus des thématiques hardcodées.
     """
-    if not KEYWORDS:
+    if not KEYWORDS and not SOLO_KEYWORDS:
         return []
-    return [
+    base = [
         '"physical vapor deposition"',
         '"chemical vapor deposition"',
         '"atomic layer deposition"',
@@ -376,6 +383,8 @@ def build_openalex_queries() -> list[str]:
         '"thin film coating" OR "hard coating" OR DLC',
         '"surface treatment" tribology',
     ]
+    extra = [f'"{kw}"' for kw in (SOLO_KEYWORDS or [])]
+    return list(dict.fromkeys(base + extra))
 
 
 def fetch_openalex_works(query: str, max_results: int = 25) -> list[dict[str, Any]]:
@@ -471,16 +480,20 @@ def build_crossref_queries() -> list[str]:
     Crossref indexe ~140M d'œuvres avec DOI. Complémentaire d'OpenAlex (qui s'appuie
     en partie sur Crossref) — capte parfois des publications plus récentes ou les
     versions auteurs (preprints) avant qu'OpenAlex les enrichisse.
+
+    Les solo_keywords sont ajoutés en plus (Crossref accepte le texte brut).
     """
-    if not KEYWORDS:
+    if not KEYWORDS and not SOLO_KEYWORDS:
         return []
-    return [
+    base = [
         "physical vapor deposition",
         "chemical vapor deposition",
         "atomic layer deposition",
         "magnetron sputtering HiPIMS",
         "thin film hard coating",
     ]
+    extra = list(SOLO_KEYWORDS or [])
+    return list(dict.fromkeys(base + extra))
 
 
 def fetch_crossref_works(query: str, max_results: int = 20) -> list[dict[str, Any]]:
@@ -559,16 +572,20 @@ def build_hal_queries() -> list[str]:
     WHY HAL : couverture FR particulièrement forte sur CEA-Leti, CNRS, ONERA
     (présents dans targets.json). Beaucoup de pré-prints français ne sont pas
     encore indexés par OpenAlex/Crossref au moment de leur dépôt sur HAL.
+
+    Les solo_keywords sont ajoutés en plus des thématiques bilingues hardcodées.
     """
-    if not KEYWORDS:
+    if not KEYWORDS and not SOLO_KEYWORDS:
         return []
-    return [
+    base = [
         '"physical vapor deposition" OR "dépôt physique"',
         '"chemical vapor deposition" OR "dépôt chimique"',
         '"atomic layer deposition" OR "dépôt par couche atomique"',
         'magnetron sputtering OR "pulvérisation magnétron"',
         '"thin film" OR "couche mince" coating',
     ]
+    extra = [f'"{kw}"' for kw in (SOLO_KEYWORDS or [])]
+    return list(dict.fromkeys(base + extra))
 
 
 def fetch_hal_publications(query: str, max_results: int = 20) -> list[dict[str, Any]]:
@@ -632,15 +649,19 @@ def build_semantic_scholar_queries() -> list[str]:
     Semantic Scholar (Allen Institute for AI) indexe ~200M papers avec
     enrichissement IA (TLDR auto, contextes citation). Couvre certains papers
     que ni Crossref ni OpenAlex n'ont encore vus.
+
+    Les solo_keywords sont ajoutés en plus (texte brut accepté par S2).
     """
-    if not KEYWORDS:
+    if not KEYWORDS and not SOLO_KEYWORDS:
         return []
-    return [
+    base = [
         "physical vapor deposition coating",
         "chemical vapor deposition thin film",
         "atomic layer deposition precursor",
         "magnetron sputtering HiPIMS hard coating",
     ]
+    extra = list(SOLO_KEYWORDS or [])
+    return list(dict.fromkeys(base + extra))
 
 
 def fetch_semantic_scholar(query: str, max_results: int = 20) -> list[dict[str, Any]]:
@@ -738,15 +759,18 @@ def build_arxiv_search_queries() -> list[str]:
     quelle catégorie (chemistry, electrical engineering, etc.) qu'on louperait
     sinon. Format : opérateur arXiv = ti:"..." OR abs:"..." (titre OU résumé).
     """
-    if not KEYWORDS:
+    if not KEYWORDS and not SOLO_KEYWORDS:
         return []
-    return [
+    base = [
         'ti:"atomic layer deposition" OR abs:"atomic layer deposition"',
         'ti:"physical vapor deposition" OR abs:"physical vapor deposition"',
         'ti:"chemical vapor deposition" OR abs:"chemical vapor deposition"',
         'ti:"magnetron sputtering" OR abs:HiPIMS',
         'ti:"thin film coating" OR abs:"hard coating"',
     ]
+    # arXiv : recherche dans le titre OU le résumé pour chaque solo
+    extra = [f'ti:"{kw}" OR abs:"{kw}"' for kw in (SOLO_KEYWORDS or [])]
+    return list(dict.fromkeys(base + extra))
 
 
 def fetch_arxiv_search(query: str, max_results: int = 20) -> list[dict[str, Any]]:
@@ -813,14 +837,17 @@ def build_web_queries() -> list[str]:
     thème plutôt que la spécificité par couple. Un suffixe « research / academic »
     biaise vers les sources universitaires que les RSS et GNews loupent.
     """
-    if not KEYWORDS:
+    if not KEYWORDS and not SOLO_KEYWORDS:
         return []
-    return [
+    base = [
         '("PVD" OR "Physical Vapor Deposition" OR "magnetron sputtering" OR "HiPIMS") research publications',
         '("CVD" OR "Chemical Vapor Deposition" OR "ALD" OR "Atomic Layer Deposition") academic breakthroughs',
         '("thin film" OR "coating" OR "DLC" OR "hard coating") materials science innovation',
         '("surface treatment" OR "tribology" OR "wear resistance") industrial coating research',
     ]
+    # Tavily : phrase exacte + biais académique pour cibler les papers
+    extra = [f'"{kw}" research academic' for kw in (SOLO_KEYWORDS or [])]
+    return list(dict.fromkeys(base + extra))
 
 
 def fetch_broad_web_search(query: str, max_results: int = 10) -> list[dict[str, Any]]:
@@ -1234,9 +1261,14 @@ def run_scraper(
 
     # Filtrage mémoire (FIFO) : on compare les URLs normalisées vs seen_urls (qui contient des URLs brutes existantes)
     # Pour la rétro-compat, seen_urls.json continue à stocker les URLs brutes ; le check se fait sur la normalisée.
+    # Note : on capture seen_normalized AVANT la mise à jour pour pouvoir tagger
+    # was_seen sur chaque article (utilisé par mailer.py pour afficher un badge
+    # "Déjà envoyé" en mode TOUT_RENVOYER).
     seen_normalized = {_normalize_url(u) for u in load_seen_urls()}
+    for a in raw_articles:
+        a["was_seen"] = _normalize_url(a.get("link", "")) in seen_normalized
     if USE_MEMORY:
-        raw_articles = [a for a in raw_articles if _normalize_url(a["link"]) not in seen_normalized]
+        raw_articles = [a for a in raw_articles if not a["was_seen"]]
 
     seen_raw = list(load_seen_urls())
     for a in raw_articles:

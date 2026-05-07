@@ -175,6 +175,23 @@ def _tag_chip(tag: str) -> str:
     )
 
 
+def _seen_badge() -> str:
+    """Badge 'Déjà envoyé' affiché dans les cartes article en mode TOUT_RENVOYER.
+
+    En mode FILTRER, les articles déjà vus sont éliminés AVANT le scoring IA, donc
+    ce badge n'apparaît jamais. En mode TOUT_RENVOYER (USE_MEMORY=False), il
+    permet à l'utilisateur de distinguer en un coup d'œil les articles qu'il a
+    déjà reçus précédemment des vrais nouveaux.
+    """
+    return (
+        '<span class="seen-badge" style="display:inline-block;font-size:10px;'
+        'background:#f3e8ff;color:#6b21a8;padding:4px 10px;border-radius:2px;'
+        'margin-left:8px;letter-spacing:.06em;font-weight:600;'
+        'text-transform:uppercase;border:1px solid #d8b4fe;'
+        'vertical-align:middle;">📌 Deja envoye</span>'
+    )
+
+
 _PREV_DATA_PATH = os.path.join(os.path.dirname(__file__), "../data/previous_ai_output.json")
 
 def _load_previous_top_articles() -> list[dict[str, Any]]:
@@ -205,10 +222,12 @@ def _render_article_card(article: dict[str, Any], index: int) -> str:
     justif      = escape(article.get("justification", ""))
     tags        = article.get("tags", [])
     collected   = article.get("collected_at", "")[:10]
+    was_seen    = bool(article.get("was_seen", False))
 
     tags_html    = "".join(_tag_chip(t) for t in tags[:6]) if tags else ""
     border_color = SCORE_LABELS.get(score, ("", "#dde4ea"))[1]
     source_icon  = _get_source_icon(source)
+    seen_html    = _seen_badge() if was_seen else ""
 
     return f"""
     <tr>
@@ -227,7 +246,7 @@ def _render_article_card(article: dict[str, Any], index: int) -> str:
               <table role="presentation" cellpadding="0" cellspacing="0"
                      style="width:100%;margin-bottom:12px;">
                 <tr>
-                  <td>{_score_badge(score)}</td>
+                  <td>{_score_badge(score)}{seen_html}</td>
                   <td style="text-align:right;">{_category_pill(category)}</td>
                 </tr>
               </table>
@@ -543,6 +562,12 @@ def build_html_email(filtered_data: dict[str, Any]) -> str:
       .tag-chip {{
         background-color: #21262d !important;
         color: #8b949e !important;
+      }}
+      /* Seen badge en dark mode */
+      .seen-badge {{
+        background-color: #2e1065 !important;
+        color: #d8b4fe !important;
+        border-color: #6b21a8 !important;
       }}
       /* TL;DR Executive Summary */
       .tldr-summary-bg {{

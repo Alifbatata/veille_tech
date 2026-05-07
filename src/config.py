@@ -59,12 +59,16 @@ RECENT_DAYS_LIMIT: int = 90          # Fenêtre de fraîcheur (jours). Veille te
 
 # --- Paramètres dynamiques (chargés depuis JSON) ---------------------------- #
 
-_cached_targets: tuple[list[str], list[str]] | None = None
+_cached_targets: tuple[list[str], list[str], list[str]] | None = None
 
-def load_targets(path: str | None = None) -> tuple[list[str], list[str]]:
+def load_targets(path: str | None = None) -> tuple[list[str], list[str], list[str]]:
     """
-    Charge les listes d'entreprises et de mots-clés depuis data/targets.json.
-    Retourne des listes vides en cas d'erreur.
+    Charge les listes d'entreprises, mots-clés couplés et solo_keywords
+    depuis data/targets.json. Retourne des listes vides en cas d'erreur.
+
+    solo_keywords : phrases cherchées SEULES (sans entreprise associée), utiles
+    quand un thème est très spécifique et n'apparaît jamais avec un nom de
+    société (ex: "Physical vapor deposition coating process").
     """
     global _cached_targets
     if _cached_targets is not None:
@@ -76,36 +80,41 @@ def load_targets(path: str | None = None) -> tuple[list[str], list[str]]:
 
     if not os.path.exists(path):
         logger.error("Fichier de cibles non trouvé : %s. Les listes de cibles seront vides.", path)
-        _cached_targets = ([], [])
+        _cached_targets = ([], [], [])
         return _cached_targets
 
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        
+
         # Dédoublonnage optimisé (comportement de set) avec préservation de l'ordre
         companies = list(dict.fromkeys(data.get("companies", [])))
         keywords = list(dict.fromkeys(data.get("keywords", [])))
-        
+        solo_keywords = list(dict.fromkeys(data.get("solo_keywords", [])))
+
         if not companies or not keywords:
             logger.warning("Le fichier %s contient des listes vides pour 'companies' ou 'keywords'.", path)
-            
+
         # Utilisation d'une variable d'environnement pour empêcher le double log
         # en cas d'imports croisés depuis plusieurs modules au runtime.
         if not os.environ.get("_TARGETS_LOGGED"):
-            logger.info("Cibles chargées depuis %s (%d entreprises, %d mots-clés).", path, len(companies), len(keywords))
+            logger.info(
+                "Cibles chargées depuis %s (%d entreprises, %d mots-clés couplés, %d solo).",
+                path, len(companies), len(keywords), len(solo_keywords),
+            )
             os.environ["_TARGETS_LOGGED"] = "1"
-            
-        _cached_targets = (companies, keywords)
+
+        _cached_targets = (companies, keywords, solo_keywords)
         return _cached_targets
-        
+
     except (json.JSONDecodeError, OSError) as e:
         logger.error("Erreur d'accès ou de parsing de %s: %s. Les listes de cibles seront vides.", path, e)
-        _cached_targets = ([], [])
+        _cached_targets = ([], [], [])
         return _cached_targets
 
 # --- Initialisation des variables globales ---------------------------------- #
 
 TARGET_COMPANIES: list[str]
 KEYWORDS: list[str]
-TARGET_COMPANIES, KEYWORDS = load_targets()
+SOLO_KEYWORDS: list[str]
+TARGET_COMPANIES, KEYWORDS, SOLO_KEYWORDS = load_targets()

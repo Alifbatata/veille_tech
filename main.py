@@ -322,17 +322,29 @@ def _memory_choice_step(console, Panel, Prompt, Confirm) -> None:
     body = (
         f"  [bold]📚 Etat actuel[/bold]\n"
         f"     • [cyan]{seen_count}[/cyan] URLs deja stockees dans "
-        f"[dim]data/seen_urls.json[/dim]\n\n"
+        f"[dim]data/seen_urls.json[/dim] [dim](= articles que tu as deja recus auparavant)[/dim]\n\n"
         "  [bold]Que veux-tu pour CE run ?[/bold]\n\n"
+
         "  [bold green][F][/bold green]iltrer les articles deja envoyes     "
         "[dim]>>> RECOMMANDE pour digest hebdomadaire[/dim]\n"
-        "      Le digest ne contiendra QUE des articles nouveaux.\n\n"
+        "      → Le digest ne contiendra [bold green]QUE des articles jamais envoyes[/bold green].\n"
+        "      → Les URLs deja vues sont eliminees AVANT le scoring IA (economie de quota).\n"
+        "      → Apres le run, les nouveaux articles vus sont ajoutes a la memoire.\n\n"
+
         "  [bold yellow][T][/bold yellow]out renvoyer (sans filtre)\n"
-        "      Tu recevras meme les articles deja envoyes precedemment\n"
-        "      (utile pour un test ou un rattrapage).\n\n"
+        "      → Tu recevras [bold yellow]TOUS les articles trouves[/bold yellow] : nouveaux ET deja envoyes,\n"
+        "        [bold]melanges dans le meme digest[/bold] sans section separee.\n"
+        "      → Les articles deja vus auront un [bold magenta]badge 'Deja envoye'[/bold magenta] dans l'email\n"
+        "        pour que tu les distingues des vrais nouveaux d'un coup d'oeil.\n"
+        "      → Utile pour tester le rendu ou rattraper apres un bug.\n\n"
+
         "  [bold red][R][/bold red]einitialiser la memoire (effacer)\n"
-        "      [red]/!\\ irreversible[/red] : vide seen_urls.json puis applique le filtre normal.\n"
-        "      Utile si tu changes de destinataires ou apres une longue pause."
+        "      [red]/!\\ irreversible[/red] : supprime [bold]seen_urls.json[/bold] (les "
+        f"[cyan]{seen_count}[/cyan] URLs sont perdues).\n"
+        "      → Pour CE run, comme la memoire est vide, [bold]tous les articles[/bold] arriveront\n"
+        "        comme s'ils etaient nouveaux (aucun badge).\n"
+        "      → Aux runs suivants, le filtre normal repart de zero.\n"
+        "      → A utiliser si tu changes de destinataires ou apres une tres longue pause."
     )
     console.print(Panel(
         body, border_style="cyan", padding=(1, 2),
@@ -460,8 +472,10 @@ def _show_targets(console, Table, Panel, targets_dict: dict | None = None) -> No
         is_live = False
     companies = targets.get("companies", [])
     keywords = targets.get("keywords", [])
+    solo_keywords = targets.get("solo_keywords", [])
 
-    nb_q = len(companies) * len(keywords)
+    # Nombre total de requetes GNews = (entreprises × mots-cles couples) + solos
+    nb_q = len(companies) * len(keywords) + len(solo_keywords)
     # Estimation duree GNews (~141s/req moyen + circadien 5h pour gros runs)
     if nb_q == 0:
         dur_est = "0 (aucune cible)"
@@ -485,8 +499,8 @@ def _show_targets(console, Table, Panel, targets_dict: dict | None = None) -> No
         t1.add_row(str(i), c)
     console.print(t1)
 
-    # Tableau keywords
-    t2 = Table(title=f"🔑  Mots-cles techniques ({len(keywords)}){live_suffix}",
+    # Tableau keywords (couples avec entreprises)
+    t2 = Table(title=f"🔑  Mots-cles couples ({len(keywords)}){live_suffix}",
                border_style="cyan")
     t2.add_column("#", style="dim", justify="right")
     t2.add_column("Mot-cle", style="green")
@@ -494,16 +508,35 @@ def _show_targets(console, Table, Panel, targets_dict: dict | None = None) -> No
         t2.add_row(str(i), k)
     console.print(t2)
 
+    # Tableau solo_keywords (cherches seuls)
+    t3 = Table(
+        title=f"🎯  Mots-cles SOLO — cherches seuls, sans entreprise ({len(solo_keywords)}){live_suffix}",
+        border_style="magenta",
+    )
+    t3.add_column("#", style="dim", justify="right")
+    t3.add_column("Phrase / mot-cle", style="magenta")
+    if not solo_keywords:
+        t3.add_row("—", "[dim](liste vide — aucune recherche solo programmee)[/dim]")
+    else:
+        for i, k in enumerate(solo_keywords, 1):
+            t3.add_row(str(i), k)
+    console.print(t3)
+
     # Recommandations
     reco = (
-        f"  📊 [bold]Total requetes Google News[/bold] = {len(companies)} × {len(keywords)} = "
+        f"  📊 [bold]Total requetes Google News[/bold] = "
+        f"({len(companies)} × {len(keywords)}) + {len(solo_keywords)} solo = "
         f"[bold cyan]{nb_q}[/bold cyan] requetes\n"
         f"  ⏱  [bold]Duree GNews estimee[/bold] : [yellow]{dur_est}[/yellow]\n\n"
         f"  💡 [bold]Recommandations[/bold] :\n"
         f"     • [green]5-10 entreprises × 5-7 mots-cles[/green]    = ~25-70 req     (1-3h, pour test)\n"
         f"     • [yellow]15 entreprises × 10 mots-cles[/yellow]        = ~150 req       (6-10h, hebdo classique)\n"
         f"     • [cyan]21 entreprises × 14 mots-cles[/cyan] (actuel) = ~294 req       (18-22h, weekend marathon)\n"
-        f"     • [red]>30 entreprises × >15 mots-cles[/red]         = >450 req       (>30h, deconseille)"
+        f"     • [red]>30 entreprises × >15 mots-cles[/red]         = >450 req       (>30h, deconseille)\n\n"
+        f"  💡 [bold]A propos des mots-cles SOLO[/bold] :\n"
+        f"     Chaque solo ajoute 1 requete GNews mais aussi 1 requete sur arXiv,\n"
+        f"     OpenAlex, Crossref, HAL, Semantic Scholar et Tavily. Reserve ce champ\n"
+        f"     a des phrases TRES specifiques de 4+ mots (sinon trop de bruit)."
     )
     console.print(Panel(reco, title="📈  Volume actuel", border_style="cyan"))
     console.print()
@@ -537,29 +570,32 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
     targets_path = os.path.join(DATA_DIR, "targets.json")
     with open(targets_path, encoding="utf-8") as f:
         targets_disk = json.load(f)
-    # Copie de travail in-memory (modifs uniquement persistees sur action 6)
+    # Copie de travail in-memory (modifs uniquement persistees sur action 8)
     targets = {
-        "companies": list(targets_disk.get("companies", [])),
-        "keywords":  list(targets_disk.get("keywords", [])),
+        "companies":     list(targets_disk.get("companies", [])),
+        "keywords":      list(targets_disk.get("keywords", [])),
+        "solo_keywords": list(targets_disk.get("solo_keywords", [])),
     }
 
     while True:
         console.print(Panel(
             "  [bold green]1[/bold green]  ➕  Ajouter une entreprise\n"
             "  [bold yellow]2[/bold yellow]  ➖  Supprimer une entreprise\n"
-            "  [bold green]3[/bold green]  ➕  Ajouter un mot-cle\n"
-            "  [bold yellow]4[/bold yellow]  ➖  Supprimer un mot-cle\n"
-            "  [bold cyan]5[/bold cyan]  📋  Revoir la liste actuelle (in-memory)\n"
-            "  [bold green]6[/bold green]  ✅  [green]Sauvegarder et continuer[/green]\n"
-            "  [bold yellow]7[/bold yellow]  ↩  [yellow]Quitter sans sauvegarder[/yellow] (annule toutes les modifs)",
+            "  [bold green]3[/bold green]  ➕  Ajouter un mot-cle [dim](couple avec chaque entreprise)[/dim]\n"
+            "  [bold yellow]4[/bold yellow]  ➖  Supprimer un mot-cle couple\n"
+            "  [bold magenta]5[/bold magenta]  ➕  Ajouter un mot-cle SOLO [dim](cherche seul, sans entreprise)[/dim]\n"
+            "  [bold yellow]6[/bold yellow]  ➖  Supprimer un mot-cle SOLO\n"
+            "  [bold cyan]7[/bold cyan]  📋  Revoir la liste actuelle (in-memory)\n"
+            "  [bold green]8[/bold green]  ✅  [green]Sauvegarder et continuer[/green]\n"
+            "  [bold yellow]9[/bold yellow]  ↩  [yellow]Quitter sans sauvegarder[/yellow] (annule toutes les modifs)",
             title="✏️  Editer les cibles",
             border_style="yellow",
         ))
         action = Prompt.ask(
             "  [bold]Que veux-tu faire ?[/bold] "
-            "[dim](tape 1-7, Entree = [bold green]6[/bold green] sauvegarder)[/dim]",
-            choices=["1", "2", "3", "4", "5", "6", "7"],
-            default="6",
+            "[dim](tape 1-9, Entree = [bold green]8[/bold green] sauvegarder)[/dim]",
+            choices=["1", "2", "3", "4", "5", "6", "7", "8", "9"],
+            default="8",
             show_default=False,
         )
 
@@ -589,13 +625,13 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
                 console.print("  [dim]Liste a jour ci-dessous :[/dim]")
                 _print_mini_list(console, Table, "🏢  Entreprises", targets["companies"], "cyan")
         elif action == "3":
-            new = Prompt.ask("  [bold]Nouveau mot-cle a ajouter[/bold] "
+            new = Prompt.ask("  [bold]Nouveau mot-cle COUPLE (sera associe a chaque entreprise)[/bold] "
                              "[dim](ex: plasma deposition)[/dim]").strip()
             if new and new not in targets["keywords"]:
                 targets["keywords"].append(new)
                 console.print(f"\n  [green]✓ Ajoute : '{new}'[/green]")
                 console.print("  [dim]Liste a jour ci-dessous (verifie l'orthographe) :[/dim]")
-                _print_mini_list(console, Table, "🔑  Mots-cles", targets["keywords"], "green")
+                _print_mini_list(console, Table, "🔑  Mots-cles couples", targets["keywords"], "green")
             elif new in targets["keywords"]:
                 console.print(f"  [yellow]⚠ '{new}' est deja dans la liste.[/yellow]")
             else:
@@ -604,43 +640,95 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
             if not targets["keywords"]:
                 console.print("  [yellow]Aucun mot-cle a supprimer.[/yellow]")
                 continue
-            _print_mini_list(console, Table, "🔑  Mots-cles", targets["keywords"], "green")
-            idx = IntPrompt.ask("  [bold]Numero du mot-cle a supprimer[/bold] "
+            _print_mini_list(console, Table, "🔑  Mots-cles couples", targets["keywords"], "green")
+            idx = IntPrompt.ask("  [bold]Numero du mot-cle couple a supprimer[/bold] "
                                 "[dim](Entree = [bold cyan]0[/bold cyan] annuler)[/dim]",
                                 default=0, show_default=False)
             if 1 <= idx <= len(targets["keywords"]):
                 removed = targets["keywords"].pop(idx - 1)
                 console.print(f"\n  [green]✓ Supprime : '{removed}'[/green]")
                 console.print("  [dim]Liste a jour ci-dessous :[/dim]")
-                _print_mini_list(console, Table, "🔑  Mots-cles", targets["keywords"], "green")
+                _print_mini_list(console, Table, "🔑  Mots-cles couples", targets["keywords"], "green")
         elif action == "5":
+            console.print(
+                "  [bold magenta]ℹ Mot-cle SOLO[/bold magenta] : phrase cherchee SEULE, "
+                "sans nom d'entreprise. Utile pour des thematiques tres specifiques\n"
+                "  qui n'apparaissent jamais avec un nom de societe.\n"
+                "  [yellow]⚠ A reserver aux phrases multi-mots de 4+ mots[/yellow] "
+                "(ex: 'Physical vapor deposition coating process').\n"
+                "  Un mot court (ex: 'PVD') ramenerait des milliers de resultats generiques.\n"
+            )
+            new = Prompt.ask("  [bold]Phrase SOLO a ajouter[/bold] "
+                             "[dim](sera cherchee telle quelle, sans entreprise)[/dim]").strip()
+            if new and new not in targets["solo_keywords"]:
+                if len(new.split()) < 3:
+                    if not Confirm.ask(
+                        f"  [yellow]⚠ '{new}' a moins de 3 mots — risque de tres nombreux "
+                        "resultats generiques. Confirmer l'ajout ?[/yellow]",
+                        default=False,
+                    ):
+                        console.print("  [dim]↩ Annule, rien ajoute.[/dim]")
+                        continue
+                targets["solo_keywords"].append(new)
+                console.print(f"\n  [green]✓ Solo ajoute : '{new}'[/green]")
+                console.print("  [dim]Liste a jour ci-dessous (verifie l'orthographe) :[/dim]")
+                _print_mini_list(console, Table, "🎯  Mots-cles SOLO", targets["solo_keywords"], "magenta")
+            elif new in targets["solo_keywords"]:
+                console.print(f"  [yellow]⚠ '{new}' est deja dans la liste solo.[/yellow]")
+            else:
+                console.print("  [yellow]⚠ Saisie vide, rien ajoute.[/yellow]")
+        elif action == "6":
+            if not targets["solo_keywords"]:
+                console.print("  [yellow]Aucun mot-cle solo a supprimer (liste vide).[/yellow]")
+                continue
+            _print_mini_list(console, Table, "🎯  Mots-cles SOLO", targets["solo_keywords"], "magenta")
+            idx = IntPrompt.ask("  [bold]Numero du mot-cle SOLO a supprimer[/bold] "
+                                "[dim](Entree = [bold cyan]0[/bold cyan] annuler)[/dim]",
+                                default=0, show_default=False)
+            if 1 <= idx <= len(targets["solo_keywords"]):
+                removed = targets["solo_keywords"].pop(idx - 1)
+                console.print(f"\n  [green]✓ Solo supprime : '{removed}'[/green]")
+                console.print("  [dim]Liste a jour ci-dessous :[/dim]")
+                _print_mini_list(console, Table, "🎯  Mots-cles SOLO", targets["solo_keywords"], "magenta")
+        elif action == "7":
             # Affiche la liste IN-MEMORY (avec indicateur 'non sauvegarde')
             _show_targets(console, Table, Panel, targets_dict=targets)
             continue
-        elif action == "6":
+        elif action == "8":
             with open(targets_path, "w", encoding="utf-8") as f:
                 json.dump(targets, f, ensure_ascii=False, indent=2)
             console.print(Panel(
                 f"[green]✅ Cibles sauvegardees dans {targets_path}[/green]\n"
-                f"   {len(targets['companies'])} entreprise(s), {len(targets['keywords'])} mot(s)-cle(s)\n\n"
+                f"   {len(targets['companies'])} entreprise(s), "
+                f"{len(targets['keywords'])} mot(s)-cle(s) couple(s), "
+                f"{len(targets['solo_keywords'])} solo\n\n"
                 f"[dim]Ces modifications sont desormais permanentes : elles seront\n"
                 f"utilisees par defaut a chaque prochain lancement du programme.[/dim]",
                 border_style="green",
             ))
             console.print()
-            # Re-import live (le module config est deja charge, on patch directement)
+            # Re-import live : patch a la fois le module config (source) et le
+            # module scraper (qui a copie les noms a son import top-level).
+            # Sans patcher scraper, les modifs ne prendraient effet qu'au prochain
+            # lancement du programme.
             try:
                 import src.config as _cfg
                 _cfg.TARGET_COMPANIES = list(targets["companies"])
                 _cfg.KEYWORDS = list(targets["keywords"])
+                _cfg.SOLO_KEYWORDS = list(targets["solo_keywords"])
+                import src.scraper as _scraper_mod
+                _scraper_mod.TARGET_COMPANIES = list(targets["companies"])
+                _scraper_mod.KEYWORDS = list(targets["keywords"])
+                _scraper_mod.SOLO_KEYWORDS = list(targets["solo_keywords"])
             except Exception:
                 pass
             return
-        elif action == "7":
+        elif action == "9":
             # Annulation : on n'ecrit rien, l'etat sur disque reste celui d'origine
             modified_companies = targets["companies"] != targets_disk.get("companies", [])
             modified_keywords  = targets["keywords"]  != targets_disk.get("keywords", [])
-            if modified_companies or modified_keywords:
+            modified_solo      = targets["solo_keywords"] != targets_disk.get("solo_keywords", [])
+            if modified_companies or modified_keywords or modified_solo:
                 if not Confirm.ask(
                     "\n  [yellow]Tu as fait des modifications NON sauvegardees. "
                     "Vraiment tout annuler et tout perdre ?[/yellow]\n"
@@ -719,14 +807,20 @@ def _show_recap_and_confirm(console, Panel, Confirm, nb_articles: int) -> bool:
     targets_path = os.path.join(DATA_DIR, "targets.json")
     with open(targets_path, encoding="utf-8") as f:
         targets = json.load(f)
-    nb_q = len(targets.get("companies", [])) * len(targets.get("keywords", []))
+    nb_companies = len(targets.get("companies", []))
+    nb_keywords  = len(targets.get("keywords", []))
+    nb_solo      = len(targets.get("solo_keywords", []))
+    nb_q = nb_companies * nb_keywords + nb_solo
 
     mem_label = _memory_choice_label or "mode par defaut (config.py)"
     summary = (
-        f"  [bold]🏢  Entreprises surveillees :[/bold] {len(targets.get('companies', []))}\n"
-        f"  [bold]🔑  Mots-cles techniques :[/bold] {len(targets.get('keywords', []))}\n"
+        f"  [bold]🏢  Entreprises surveillees :[/bold] {nb_companies}\n"
+        f"  [bold]🔑  Mots-cles couples :[/bold] {nb_keywords}\n"
+        f"  [bold]🎯  Mots-cles SOLO :[/bold] [magenta]{nb_solo}[/magenta]"
+        f"{' [dim](aucun — recherches solo desactivees)[/dim]' if nb_solo == 0 else ''}\n"
         f"  [bold]📦  Articles par source RSS :[/bold] [cyan]{nb_articles}[/cyan]\n"
-        f"  [bold]🔍  Requetes Google News :[/bold] [cyan]{nb_q}[/cyan]\n"
+        f"  [bold]🔍  Requetes Google News :[/bold] [cyan]{nb_q}[/cyan] "
+        f"[dim]({nb_companies}×{nb_keywords} + {nb_solo} solo)[/dim]\n"
         f"  [bold]🧠  Memoire :[/bold] [cyan]{mem_label}[/cyan]\n"
         f"\n  [dim]Si tout est correct, le programme va demarrer le pipeline complet "
         f"(RSS + arXiv + OpenAlex + Crossref + HAL + Semantic Scholar + Tavily + Google News + IA + email).[/dim]"
