@@ -32,7 +32,14 @@ logger = logging.getLogger("proxy_manager")
 # Constantes
 _HEALTH_CHECK_URL = "https://httpbin.org/ip"
 _HEALTH_CHECK_TIMEOUT = 15.0
-_MAX_FAILURES_BEFORE_DISABLE = 3   # une fois ce seuil atteint, proxy marqué dead
+# Seuil d'echecs avant de marquer un proxy "dead". Adapte au nombre de proxies :
+#   - 1 seul proxy   : 5 echecs (plus tolerant, on n'a pas de backup)
+#   - 2-3 proxies   : 3 echecs (on rotate rapidement vers le suivant)
+_MAX_FAILURES_SINGLE = 5
+_MAX_FAILURES_POOL   = 3
+# Auto-recovery : un proxy marque "dead" est retest apres ce delai. S'il revient
+# en ligne, il est reactivé automatiquement (sans intervention de l'utilisateur).
+_RECOVERY_RETEST_INTERVAL = 60.0  # secondes
 _PROXY_ENV_VARS = (
     "RESIDENTIAL_PROXY_PRIMARY",
     "RESIDENTIAL_PROXY_BACKUP",
@@ -43,12 +50,13 @@ _PROXY_ENV_VARS = (
 @dataclass
 class _ProxyEntry:
     """Représente un proxy avec son état de santé courant."""
-    name: str               # nom de la variable env (pour logs)
-    url: str                # URL complète avec credentials
-    healthy: bool = True    # False -> retiré du pool jusqu'à reset manuel
-    failure_count: int = 0  # incrémenté à chaque échec, reset si succès
+    name: str                       # nom de la variable env (pour logs)
+    url: str                        # URL complète avec credentials
+    healthy: bool = True            # False -> retiré du pool jusqu'à recovery
+    failure_count: int = 0          # incrémenté à chaque échec, reset si succès
     last_used: float = field(default_factory=time.monotonic)
-    last_check: float = 0.0  # timestamp du dernier health check
+    last_check: float = 0.0         # timestamp du dernier health check
+    unhealthy_since: float = 0.0    # timestamp du marquage HORS-LIGNE (pour auto-recovery)
 
     def masked_url(self) -> str:
         """Retourne l'URL avec les credentials masqués pour les logs."""
@@ -151,10 +159,44 @@ class ProxyManager:
         """True si au moins un proxy est marqué comme sain."""
         return any(p.healthy for p in self._pool)
 
+    def _try_recover_proxies(self) -> None:
+        """Auto-recovery : retente un health check sur les proxies marques HORS-LIGNE
+        depuis plus de _RECOVERY_RETEST_INTERVAL secondes. S'ils repondent, on
+        les reactive automatiquement.
+
+        Particulierement utile en mode mono-provider : sans backup, perdre le
+        seul proxy = perte de protection. Cette boucle de recovery permet de
+        recuperer apres une panne transitoire sans intervention.
+        """
+        now = time.monotonic()
+        for entry in self._pool:
+            if entry.healthy:
+                continue
+            if now - entry.unhealthy_since < _RECOVERY_RETEST_INTERVAL:
+                continue
+            logger.info(f"🔁 Auto-recovery : retest de {entry.name}…")
+            ok, msg = self._check_proxy_health(entry.url)
+            entry.last_check = now
+            if ok:
+                entry.healthy = True
+                entry.failure_count = 0
+                entry.unhealthy_since = 0.0
+                logger.info(f"   ✅ {entry.name} de retour en ligne — {msg}")
+            else:
+                entry.unhealthy_since = now  # decale le prochain retest
+                logger.debug(f"   ❌ {entry.name} toujours HORS-LIGNE — {msg}")
+
     def current_proxy(self) -> _ProxyEntry | None:
-        """Retourne l'entrée proxy active (premier sain à partir de _current_idx)."""
+        """Retourne l'entrée proxy active (premier sain à partir de _current_idx).
+
+        Si aucun proxy n'est sain, tente une auto-recovery sur les proxies
+        marqués HORS-LIGNE depuis assez longtemps avant de renvoyer None.
+        """
         if not self._pool:
             return None
+        # Auto-recovery : si tous les proxies sont down, retente les plus vieux
+        if not self.has_healthy_proxy():
+            self._try_recover_proxies()
         n = len(self._pool)
         for offset in range(n):
             idx = (self._current_idx + offset) % n
@@ -176,18 +218,26 @@ class ProxyManager:
     def mark_failure(self) -> None:
         """Incrémente le compteur d'échecs du proxy courant.
 
-        Au-delà de _MAX_FAILURES_BEFORE_DISABLE échecs consécutifs, le proxy est
-        marqué unhealthy et exclu du pool jusqu'à un éventuel reset manuel.
+        Le seuil de disable est adaptatif :
+        - Pool de 1 seul proxy : 5 échecs (mode mono-provider, plus tolérant)
+        - Pool de 2-3 proxies : 3 échecs (on rotate vite vers le suivant)
+
+        Au-dela du seuil, le proxy est marqué HORS-LIGNE. Mais grace a
+        _try_recover_proxies(), il pourra etre reactive automatiquement
+        s'il revient en ligne dans les minutes suivantes.
         """
         entry = self.current_proxy()
         if entry is None:
             return
         entry.failure_count += 1
-        if entry.failure_count >= _MAX_FAILURES_BEFORE_DISABLE:
+        threshold = _MAX_FAILURES_SINGLE if len(self._pool) == 1 else _MAX_FAILURES_POOL
+        if entry.failure_count >= threshold:
             entry.healthy = False
+            entry.unhealthy_since = time.monotonic()
             logger.warning(
                 f"⚠️ Proxy {entry.name} marqué HORS-LIGNE après "
-                f"{_MAX_FAILURES_BEFORE_DISABLE} échecs consécutifs."
+                f"{threshold} échecs consécutifs (sera retesté dans "
+                f"{int(_RECOVERY_RETEST_INTERVAL)}s pour auto-recovery)."
             )
 
     def mark_success(self) -> None:
