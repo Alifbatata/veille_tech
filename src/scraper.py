@@ -823,12 +823,12 @@ def build_arxiv_search_queries() -> list[str]:
     return list(dict.fromkeys(base + kw_q + solo_q + org_q))
 
 
-def fetch_arxiv_search(query: str, max_results: int = 20) -> list[dict[str, Any]]:
+def fetch_arxiv_search(query: str, max_results: int = 20) -> list[dict[str, Any]] | None:
     """Interroge l'API arXiv (Atom) par mot-clé.
 
-    L'API publique arXiv n'a pas de quota strict mais demande un User-Agent
-    identifiable et un débit raisonnable (1 req/3s recommandé).
-    Format de requête : http://export.arxiv.org/api/query?search_query=...
+    L'API publique arXiv exige un User-Agent identifiable et un débit
+    raisonnable (1 req/3s recommandé). HTTPS obligatoire désormais sur
+    cet endpoint (HTTP redirige mais arXiv applique des restrictions).
 
     Args:
         query: requête arXiv (ex: 'ti:"PVD" OR abs:"physical vapor deposition"').
@@ -836,22 +836,32 @@ def fetch_arxiv_search(query: str, max_results: int = 20) -> list[dict[str, Any]
 
     Returns:
         Liste d'articles au format unifié, déjà filtrés par RECENT_DAYS_LIMIT.
+        Retourne None si HTTP 429/403 -> permet au caller (run_scraper) de
+        compter les blocages consécutifs et déclencher un circuit breaker.
     """
     url = (
-        "http://export.arxiv.org/api/query"
+        "https://export.arxiv.org/api/query"
         f"?search_query={quote_plus(query)}"
         f"&start=0&max_results={max_results}"
         "&sortBy=submittedDate&sortOrder=descending"
     )
 
+    # User-Agent identifiable conformement a la politique arXiv (RFC 7231).
+    # arXiv demande explicitement de fournir un UA distinct des navigateurs
+    # standards pour les acces API automatises (mailto facultatif mais aide).
+    arxiv_headers = {
+        "User-Agent": "VeilleTechno-Pipeline/1.0 (research; +https://github.com/)",
+        "Accept": "application/atom+xml",
+    }
+
     _respect_domain_cooldown(url)
     session = _get_session()
     try:
-        response = session.get(url, timeout=20)
+        response = session.get(url, timeout=20, headers=arxiv_headers)
         if response.status_code in (403, 429):
             _record_block(url, base_seconds=180.0)
             logger.warning(f"🚫 arXiv : statut HTTP {response.status_code}")
-            return []
+            return None  # Signale un blocage au caller (circuit breaker)
         response.raise_for_status()
     except (RequestsError, OSError) as exc:
         logger.warning(f"❌ arXiv : erreur réseau pour « {query[:60]}... » : {exc}")
@@ -1256,12 +1266,30 @@ def run_scraper(
         _maybe_inter_source_pause("arXiv")
         ax_queries = build_arxiv_search_queries()
         logger.info(f"🔬 Lancement arXiv Search : {len(ax_queries)} requêtes thématiques.")
+        # Circuit breaker : si arXiv blackliste l'IP (429/403 consecutifs), on
+        # abandonne arXiv pour ce run plutot que d'attendre 75 cooldowns de 180s.
+        # Les autres sources (OpenAlex, Crossref, etc.) ne sont pas affectees.
+        _ARXIV_MAX_CONSEC_BLOCKS = 3
+        consecutive_blocks = 0
         for idx, q in enumerate(ax_queries, 1):
             logger.info(f"🔬 arXiv search [{idx}/{len(ax_queries)}] : « {q[:80]}... »")
-            all_articles.extend(fetch_arxiv_search(q))
-            # arXiv recommande ~3s minimum, on monte à 8-20s pour rester ultra-poli
+            result = fetch_arxiv_search(q)
+            if result is None:
+                consecutive_blocks += 1
+                if consecutive_blocks >= _ARXIV_MAX_CONSEC_BLOCKS:
+                    logger.error(
+                        f"🛑 arXiv : {_ARXIV_MAX_CONSEC_BLOCKS} blocages consecutifs (429/403) — "
+                        "abandon de arXiv search pour ce run. Les autres sources continuent."
+                    )
+                    break
+            else:
+                consecutive_blocks = 0  # reset si une requete passe
+                all_articles.extend(result)
+            # arXiv recommande >=3s, on monte a 15-30s pour rester ultra-poli
+            # (le 1 req/3s est un MAX, pas un objectif). Plus on attend, moins
+            # on risque de declencher leur rate-limit comportemental.
             if idx < len(ax_queries):
-                time.sleep(max(8.0, random.gauss(14.0, 4.0)))
+                time.sleep(max(12.0, random.gauss(20.0, 5.0)))
         _executed_blocks.append("arXiv")
 
     if include_openalex:
