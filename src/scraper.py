@@ -1392,7 +1392,7 @@ def build_patents_queries() -> list[str]:
     return list(dict.fromkeys(base + kw_q + solo_q + org_q + cross_q))
 
 
-def fetch_google_patents(query: str, max_results: int = 15) -> list[dict[str, Any]]:
+def fetch_google_patents(query: str, max_results: int = 15) -> list[dict[str, Any]] | None:
     """Interroge Google Patents via l'endpoint xhr/query (gratuit, sans clé).
 
     Endpoint : https://patents.google.com/xhr/query?url=q%3D...&exp=
@@ -1423,13 +1423,21 @@ def fetch_google_patents(query: str, max_results: int = 15) -> list[dict[str, An
             url, timeout=20,
             headers={"Accept": "application/json", "Referer": "https://patents.google.com/"},
         )
-        if response.status_code in (403, 429):
-            _record_block(url, base_seconds=180.0)
+        # 503/502/504 = service unavailable / bad gateway / gateway timeout.
+        # Sur Google Patents, un 503 systematique signe une detection bot
+        # (l'IP est blackliste cote Google). Cooldown long + retour None
+        # permettent au caller (run_scraper) de declencher son circuit breaker
+        # apres 3 strikes consecutifs et eviter de hammerer pour rien.
+        if response.status_code in (403, 429, 502, 503, 504):
+            _record_block(url, base_seconds=240.0)
             logger.warning(f"🚫 Google Patents : statut HTTP {response.status_code}")
-            return []
+            return None
         response.raise_for_status()
     except (RequestsError, OSError) as exc:
         logger.warning(f"❌ Google Patents : erreur réseau pour « {query[:60]}... » : {exc}")
+        # Erreur reseau (timeout, dns) — pas un blocage clair, on retourne []
+        # (ne compte pas dans le circuit breaker) pour laisser le pipeline
+        # continuer sans abandonner Patents sur un seul incident.
         return []
 
     try:
@@ -1739,15 +1747,47 @@ def run_scraper(
     if include_patents:
         _maybe_inter_source_pause("Patents")
         pat_queries = build_patents_queries()
-        logger.info(f"📜 Lancement Google Patents : {len(pat_queries)} requêtes thématiques.")
-        for idx, q in enumerate(pat_queries, 1):
-            logger.info(f"📜 Google Patents [{idx}/{len(pat_queries)}] : « {q[:80]}... »")
-            all_articles.extend(fetch_google_patents(q))
-            # Pause inter-requête : Patents tolère bien plus que GNews mais
-            # on reste poli (8-15s) pour éviter ban IP comportemental.
-            if idx < len(pat_queries):
-                time.sleep(max(6.0, random.gauss(10.0, 3.0)))
-        _executed_blocks.append("Patents")
+        # Pre-flight : 1 requete test pour detecter un blocage (503/429/etc.)
+        # avant de lancer 100+ requetes qui echoueraient toutes et perdre 20 min.
+        # Si l'endpoint xhr/query est down ou que l'IP est blackliste, on skip
+        # immediatement le bloc et le pipeline continue avec les autres sources.
+        logger.info(f"📜 Google Patents pre-flight : test connectivite sur 1 requete simple…")
+        preflight = fetch_google_patents('"thin film"', max_results=1)
+        if preflight is None:
+            logger.error(
+                "🛑 Google Patents pre-flight : HTTP 503/429/403 — endpoint indisponible "
+                "ou IP probablement detectee comme bot. Abandon de Google Patents pour "
+                "CE run. Reessaie plus tard ou configure un proxy residentiel "
+                "(.env : RESIDENTIAL_PROXY_PRIMARY) pour eliminer ce risque."
+            )
+        else:
+            logger.info(
+                f"📜 Google Patents pre-flight OK ({len(preflight)} brevet(s)) — lancement "
+                f"de {len(pat_queries)} requetes thematiques."
+            )
+            # Circuit breaker : 3 blocages consecutifs (None) = abandon
+            _PATENTS_MAX_CONSEC_BLOCKS = 3
+            consecutive_blocks = 0
+            all_articles.extend(preflight)  # le pre-flight a deja un resultat utile
+            for idx, q in enumerate(pat_queries, 1):
+                logger.info(f"📜 Google Patents [{idx}/{len(pat_queries)}] : « {q[:80]}... »")
+                result = fetch_google_patents(q)
+                if result is None:
+                    consecutive_blocks += 1
+                    if consecutive_blocks >= _PATENTS_MAX_CONSEC_BLOCKS:
+                        logger.error(
+                            f"🛑 Google Patents : {_PATENTS_MAX_CONSEC_BLOCKS} blocages "
+                            "consecutifs — abandon pour ce run. Les autres sources continuent."
+                        )
+                        break
+                else:
+                    consecutive_blocks = 0  # reset si une requete passe
+                    all_articles.extend(result)
+                # Pause inter-requete plus polie : 12-20s (au lieu de 6-13s) pour
+                # reduire le risque de detection bot comportementale Google.
+                if idx < len(pat_queries):
+                    time.sleep(max(10.0, random.gauss(15.0, 4.0)))
+            _executed_blocks.append("Patents")
 
     if include_gnews:
         _maybe_inter_source_pause("GoogleNews")
