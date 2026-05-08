@@ -1008,7 +1008,6 @@ def _remove_actor_from_disk(name: str) -> None:
         with open(_DISCOVERED_ACTORS_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
         actors = data.get("actors", {})
-        # Recherche case-insensitive sur la valeur "name"
         norm = name.strip().lower()
         to_delete = [k for k, v in actors.items() if v.get("name", "").lower() == norm]
         for k in to_delete:
@@ -1017,6 +1016,148 @@ def _remove_actor_from_disk(name: str) -> None:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except (OSError, json.JSONDecodeError):
         pass
+
+
+# =============================================================================
+# Stats requetes : action 12 du menu d'edition (consultation interactive)
+# =============================================================================
+
+_QUERY_STATS_PATH = os.path.join(DATA_DIR, "query_stats.json")
+
+
+def _show_query_stats_panel(console, Table, Panel, Prompt) -> None:
+    """Action 12 : revue des stats cumulatives des requetes par source.
+
+    Affiche un menu interactif avec 3 vues :
+      - Top productives (hits_total desc) : requetes a garder absolument
+      - Top steriles (consecutive_zeros desc) : requetes candidates a retirer/reformuler
+      - Par source : groupe par source, classement par hits_total
+    """
+    if not os.path.exists(_QUERY_STATS_PATH):
+        console.print(Panel(
+            "[dim]Aucune statistique disponible.\n\nLance d'abord un run complet (python main.py).\n"
+            "Le pipeline collectera les stats automatiquement et les persistera ici.[/dim]",
+            title="📊 Statistiques des requetes (vide)", border_style="dim",
+        ))
+        console.print()
+        return
+
+    try:
+        with open(_QUERY_STATS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        queries = list(data.get("queries", {}).values())
+    except (OSError, json.JSONDecodeError) as e:
+        console.print(f"[red]✘ Erreur lecture {_QUERY_STATS_PATH} : {e}[/red]\n")
+        return
+
+    if not queries:
+        console.print(Panel(
+            "[dim]Le fichier de stats existe mais est vide. Lance un run pour le peupler.[/dim]",
+            title="📊 Statistiques des requetes (vide)", border_style="dim",
+        ))
+        console.print()
+        return
+
+    last_updated = (data.get("last_updated") or "")[:10]
+    total_q = len(queries)
+    sterile_4plus = sum(1 for q in queries if q.get("consecutive_zeros", 0) >= 4)
+
+    while True:
+        console.print(Panel(
+            f"  [dim]Total : {total_q} requetes uniques tracées · Derniere MAJ : {last_updated} · "
+            f"[bold red]{sterile_4plus}[/bold red] requetes avec [bold]4+ runs consecutifs a 0[/bold] (candidates a reformuler)[/dim]\n\n"
+            "  [bold green]p[/bold green]  Top 30 requetes les + [bold green]productives[/bold green] (hits cumules desc)\n"
+            "  [bold red]s[/bold red]  Top 30 requetes les + [bold red]steriles[/bold red] (cons. zeros desc)\n"
+            "  [bold cyan]a[/bold cyan]  Vue [bold]par source[/bold] (top 20 par source, classement hits)\n"
+            "  [bold yellow]q[/bold yellow]  Retour au menu principal",
+            title="📊 Statistiques cumulatives des requetes",
+            border_style="cyan",
+        ))
+        choice = Prompt.ask(
+            "  [bold]Quelle vue ?[/bold] [dim](Entree = [bold yellow]q[/bold yellow] retour)[/dim]",
+            choices=["p", "s", "a", "q"],
+            default="q", show_default=False, show_choices=False,
+        ).lower()
+
+        if choice == "q":
+            return
+
+        if choice == "p":
+            sorted_q = sorted(queries, key=lambda x: x.get("hits_total", 0), reverse=True)[:30]
+            t = Table(
+                title=f"Top 30 requetes les + productives (sur {total_q} totales)",
+                border_style="green",
+            )
+            t.add_column("Requete", style="bold cyan", overflow="fold", max_width=60)
+            t.add_column("Source", style="yellow")
+            t.add_column("Hits cumules", justify="right", style="bold green")
+            t.add_column("Last run", justify="right")
+            t.add_column("Runs", justify="right", style="dim")
+            for q in sorted_q:
+                t.add_row(
+                    q.get("query", "?"),
+                    q.get("source", "?"),
+                    str(q.get("hits_total", 0)),
+                    str(q.get("hits_last_run", 0)),
+                    str(q.get("runs_total", 0)),
+                )
+            console.print(t)
+        elif choice == "s":
+            sorted_q = sorted(queries, key=lambda x: x.get("consecutive_zeros", 0), reverse=True)[:30]
+            t = Table(
+                title=f"Top 30 requetes les + steriles (consecutive_zeros desc)",
+                border_style="red",
+            )
+            t.add_column("Requete", style="cyan", overflow="fold", max_width=60)
+            t.add_column("Source", style="yellow")
+            t.add_column("Cons. 0", justify="right", style="bold red")
+            t.add_column("Hits total", justify="right", style="dim")
+            t.add_column("Runs", justify="right", style="dim")
+            t.add_column("Last hit", style="dim")
+            for q in sorted_q:
+                last_hit = (q.get("last_hit_run") or "")[:10] or "jamais"
+                t.add_row(
+                    q.get("query", "?"),
+                    q.get("source", "?"),
+                    str(q.get("consecutive_zeros", 0)),
+                    str(q.get("hits_total", 0)),
+                    str(q.get("runs_total", 0)),
+                    last_hit,
+                )
+            console.print(t)
+            console.print(
+                "  [dim]💡 Les requetes avec [bold red]Cons. 0[/bold red] >= 4 sont candidates "
+                "a retrait ou reformulation.[/dim]\n"
+                "  [dim]Pour les retirer, utilise les actions 1-10 du menu principal "
+                "selon la liste source (entreprise/keyword/solo/labo/cross-domaine).[/dim]\n"
+            )
+        elif choice == "a":
+            by_source: dict = {}
+            for q in queries:
+                by_source.setdefault(q.get("source", "?"), []).append(q)
+            for src, qs in sorted(by_source.items()):
+                qs.sort(key=lambda x: x.get("hits_total", 0), reverse=True)
+                shown = qs[:20]
+                t = Table(
+                    title=f"Source : [bold]{src}[/bold] ({len(qs)} requetes uniques)",
+                    border_style="cyan",
+                )
+                t.add_column("Requete", style="bold cyan", overflow="fold", max_width=60)
+                t.add_column("Hits cumules", justify="right", style="green")
+                t.add_column("Last run", justify="right")
+                t.add_column("Cons. 0", justify="right", style="red")
+                for q in shown:
+                    t.add_row(
+                        q.get("query", "?"),
+                        str(q.get("hits_total", 0)),
+                        str(q.get("hits_last_run", 0)),
+                        str(q.get("consecutive_zeros", 0)),
+                    )
+                console.print(t)
+                if len(qs) > 20:
+                    console.print(f"  [dim]({len(qs) - 20} requetes masquees pour {src})[/dim]\n")
+
+        console.print()
 
 
 def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> None:
@@ -1061,19 +1202,21 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
             "[dim](photonique, MEMS, nanotech, biomim... transferable a PVD/ALD)[/dim]\n"
             "  [bold yellow]10[/bold yellow]  ➖  Supprimer un theme cross-domaine\n"
             f"  [bold bright_cyan]11[/bold bright_cyan]  🔍  Revoir les acteurs DECOUVERTS automatiquement "
-            f"[dim](nouveaux deposants/labos repas dans les resultats : "
+            f"[dim](nouveaux deposants/labos reperes dans les resultats : "
             f"[bold]{nb_discovered}[/bold] candidats)[/dim]\n"
-            "  [bold cyan]12[/bold cyan]  📋  Revoir la liste actuelle (in-memory)\n"
-            "  [bold green]13[/bold green]  ✅  [green]Sauvegarder et continuer[/green]\n"
-            "  [bold yellow]14[/bold yellow]  ↩  [yellow]Quitter sans sauvegarder[/yellow] (annule tout)",
+            "  [bold bright_cyan]12[/bold bright_cyan]  📊  Voir les STATS des requetes "
+            "[dim](top productives, top steriles, par source — pour optimiser tes listes)[/dim]\n"
+            "  [bold cyan]13[/bold cyan]  📋  Revoir la liste actuelle (in-memory)\n"
+            "  [bold green]14[/bold green]  ✅  [green]Sauvegarder et continuer[/green]\n"
+            "  [bold yellow]15[/bold yellow]  ↩  [yellow]Quitter sans sauvegarder[/yellow] (annule tout)",
             title="✏️  Editer les cibles",
             border_style="yellow",
         ))
         action = Prompt.ask(
             "  [bold]Que veux-tu faire ?[/bold] "
-            "[dim](tape 1-14, Entree = [bold green]13[/bold green] sauvegarder)[/dim]",
-            choices=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14"],
-            default="13",
+            "[dim](tape 1-15, Entree = [bold green]14[/bold green] sauvegarder)[/dim]",
+            choices=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"],
+            default="14",
             show_default=False,
         )
 
@@ -1256,10 +1399,14 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
             # ou rejeter (suppression de la liste de candidats).
             _review_discovered_actors(console, Table, Panel, Prompt, IntPrompt, targets)
         elif action == "12":
+            # Stats des requetes : top productives, top steriles, par source.
+            # Aide a reperer les requetes a reformuler ou retirer manuellement.
+            _show_query_stats_panel(console, Table, Panel, Prompt)
+        elif action == "13":
             # Affiche la liste IN-MEMORY (avec indicateur 'non sauvegarde')
             _show_targets(console, Table, Panel, targets_dict=targets)
             continue
-        elif action == "13":
+        elif action == "14":
             targets["companies"].sort(key=str.lower)
             targets["keywords"].sort(key=str.lower)
             targets["solo_keywords"].sort(key=str.lower)
@@ -1296,7 +1443,7 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
             except Exception:
                 pass
             return
-        elif action == "14":
+        elif action == "15":
             # Annulation : on n'ecrit rien, l'etat sur disque reste celui d'origine
             modified_companies = targets["companies"] != targets_disk.get("companies", [])
             modified_keywords  = targets["keywords"]  != targets_disk.get("keywords", [])

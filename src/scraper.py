@@ -204,6 +204,181 @@ def get_session_discovered_actors() -> list[dict[str, Any]]:
     actors.sort(key=lambda a: a.get("count", 0), reverse=True)
     return actors
 
+
+# =============================================================================
+# Stats requetes : compte le nombre de resultats par (requete, source) pour
+# permettre a l'utilisateur de voir quelles requetes sont productives et
+# lesquelles sont steriles. Persistance cumulative dans data/query_stats.json.
+# Affichage Rich a la fin de chaque run + action 12 du menu CLI pour explorer.
+# =============================================================================
+
+_QUERY_STATS_PATH = os.path.join(os.path.dirname(__file__), "../data/query_stats.json")
+# key = "query|||source", value = count for current run
+_query_stats_session: dict[str, int] = {}
+
+
+def _query_stat_key(query: str, source: str) -> str:
+    """Construit la cle canonique pour le dict de stats (truncate longues queries)."""
+    return f"{query[:200]}|||{source}"
+
+
+def _record_query_stat(query: str, source: str, count: int) -> None:
+    """Enregistre le nombre de resultats d'une requete sur une source.
+
+    Cumule en memoire pendant le run, persiste en fin via _save_query_stats().
+    Tolere count=None (traite comme 0).
+    """
+    if not query:
+        return
+    key = _query_stat_key(query, source)
+    _query_stats_session[key] = int(count) if count is not None else 0
+
+
+def _load_query_stats() -> dict[str, dict[str, Any]]:
+    """Charge l'historique cumulatif des stats de requetes."""
+    if not os.path.exists(_QUERY_STATS_PATH):
+        return {}
+    try:
+        with open(_QUERY_STATS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("queries", {})
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning(f"⚠️ Lecture {_QUERY_STATS_PATH} : {e}")
+        return {}
+
+
+def _save_query_stats() -> None:
+    """Persiste les stats du run en mergeant avec l'historique cumulatif.
+
+    Pour chaque (query, source) on garde :
+      - hits_total      : somme cumulee des resultats sur tous les runs
+      - hits_last_run   : nombre de resultats du dernier run
+      - runs_total      : nombre de fois qu'on a execute cette requete
+      - consecutive_zeros : nombre de runs consecutifs avec 0 resultat
+                            (reset a 0 des qu'un run rapporte > 0)
+      - last_hit_run    : ISO date du dernier run avec > 0 resultat
+      - first_seen      : ISO date d'apparition de la requete
+    """
+    if not _query_stats_session:
+        return
+    historical = _load_query_stats()
+    today_iso = datetime.now(timezone.utc).isoformat()
+    for key, count in _query_stats_session.items():
+        # Parse key: "query|||source"
+        parts = key.split("|||", 1)
+        query = parts[0]
+        source = parts[1] if len(parts) > 1 else "?"
+
+        hist = historical.get(key)
+        if hist is None:
+            historical[key] = {
+                "query":             query,
+                "source":            source,
+                "hits_total":        count,
+                "hits_last_run":     count,
+                "runs_total":        1,
+                "consecutive_zeros": 1 if count == 0 else 0,
+                "last_hit_run":      today_iso if count > 0 else None,
+                "first_seen":        today_iso,
+            }
+        else:
+            hist["hits_total"]    = hist.get("hits_total", 0) + count
+            hist["hits_last_run"] = count
+            hist["runs_total"]    = hist.get("runs_total", 0) + 1
+            if count == 0:
+                hist["consecutive_zeros"] = hist.get("consecutive_zeros", 0) + 1
+            else:
+                hist["consecutive_zeros"] = 0
+                hist["last_hit_run"]      = today_iso
+
+    try:
+        os.makedirs(os.path.dirname(_QUERY_STATS_PATH), exist_ok=True)
+        with open(_QUERY_STATS_PATH, "w", encoding="utf-8") as f:
+            json.dump(
+                {"queries": historical, "last_updated": today_iso},
+                f, ensure_ascii=False, indent=2,
+            )
+        logger.info(
+            f"📊 Stats requetes : {len(_query_stats_session)} requetes ce run, "
+            f"{len(historical)} cumulees historiquement."
+        )
+    except OSError as e:
+        logger.warning(f"⚠️ Impossible de sauver {_QUERY_STATS_PATH} : {e}")
+
+
+def _print_query_stats_summary() -> None:
+    """Affiche en fin de run un tableau Rich des top productives et top steriles.
+
+    Robuste : si Rich n'est pas dispo, ou si l'encoding Windows console fait
+    crasher l'affichage, fallback gracieux sur un log texte simple. Le
+    pipeline ne doit jamais crasher juste parce qu'on n'a pas pu imprimer
+    un joli tableau de stats.
+    """
+    if not _query_stats_session:
+        return
+
+    items = list(_query_stats_session.items())
+    items.sort(key=lambda x: x[1], reverse=True)
+    productive_total = sum(1 for i in items if i[1] > 0)
+    sterile_total    = sum(1 for i in items if i[1] == 0)
+
+    try:
+        from rich.console import Console
+        from rich.table import Table
+        # force_terminal=True + stdout=sys.stdout pour eviter les problemes
+        # d'encoding cp1252 sur Windows console
+        import sys as _sys
+        try:
+            _sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+        except (AttributeError, OSError):
+            pass
+        console = Console()
+
+        productive = [i for i in items if i[1] > 0][:15]
+        sterile    = [i for i in items if i[1] == 0][:15]
+
+        if productive:
+            t1 = Table(
+                title=f"📊 Top 15 requetes les + productives ce run ({productive_total} productives au total)",
+                border_style="green",
+            )
+            t1.add_column("Requete", style="bold cyan", overflow="fold", max_width=70)
+            t1.add_column("Source", style="yellow")
+            t1.add_column("Hits", justify="right", style="bold green")
+            for key, count in productive:
+                query, _, source = key.partition("|||")
+                t1.add_row(query, source, str(count))
+            console.print(t1)
+
+        if sterile:
+            t2 = Table(
+                title=f"📉 Top 15 requetes a 0 resultat ce run ({sterile_total} steriles au total)",
+                border_style="dim red",
+            )
+            t2.add_column("Requete", style="dim cyan", overflow="fold", max_width=70)
+            t2.add_column("Source", style="dim yellow")
+            for key, _ in sterile:
+                query, _, source = key.partition("|||")
+                t2.add_row(query, source)
+            console.print(t2)
+            if sterile_total > 15:
+                console.print(
+                    f"  [dim]({sterile_total - 15} autres masques. "
+                    "Voir python main.py → menu edition → action 12 pour la liste complete.)[/dim]"
+                )
+
+        console.print(
+            "[dim]💡 Pour explorer l'historique cumulatif (tendances inter-runs), lance "
+            "python main.py → menu edition → action 12 (Stats des requetes).[/dim]"
+        )
+    except Exception as e:
+        # Fallback : log texte simple, jamais de crash sur ce point
+        logger.info(
+            f"📊 Stats : {productive_total} req productives, {sterile_total} req a 0 resultat. "
+            f"(Affichage Rich indisponible : {type(e).__name__})"
+        )
+
+
 def _client_hints_for(user_agent: str) -> dict[str, str]:
     """Construit les Client Hints Chrome (Sec-Ch-Ua-*) cohérents avec un User-Agent.
 
@@ -533,8 +708,9 @@ def fetch_rss_feed(source: dict[str, str]) -> list[dict[str, Any]]:
             "collected_at": datetime.now(timezone.utc).isoformat()
         })
         if len(articles) >= MAX_ARTICLES_PER_SOURCE: break
-    
+
     logger.info(f"   └─ {len(articles)} article(s) collecté(s)")
+    _record_query_stat(name, "rss", len(articles))
     return articles
 
 def build_openalex_queries() -> list[str]:
@@ -662,6 +838,7 @@ def fetch_openalex_works(query: str, max_results: int = 25) -> list[dict[str, An
             "collected_at": datetime.now(timezone.utc).isoformat(),
         })
     logger.info(f"   └─ OpenAlex : {len(articles)} résultat(s) pour « {query[:60]}... »")
+    _record_query_stat(query, "openalex", len(articles))
     return articles
 
 
@@ -763,6 +940,7 @@ def fetch_crossref_works(query: str, max_results: int = 20) -> list[dict[str, An
             "collected_at": datetime.now(timezone.utc).isoformat(),
         })
     logger.info(f"   └─ Crossref : {len(articles)} résultat(s) pour « {query[:60]}... »")
+    _record_query_stat(query, "crossref", len(articles))
     return articles
 
 
@@ -848,6 +1026,7 @@ def fetch_hal_publications(query: str, max_results: int = 20) -> list[dict[str, 
             "collected_at": datetime.now(timezone.utc).isoformat(),
         })
     logger.info(f"   └─ HAL : {len(articles)} résultat(s) pour « {query[:60]}... »")
+    _record_query_stat(query, "hal", len(articles))
     return articles
 
 
@@ -964,6 +1143,7 @@ def fetch_semantic_scholar(query: str, max_results: int = 20) -> list[dict[str, 
             "collected_at": datetime.now(timezone.utc).isoformat(),
         })
     logger.info(f"   └─ Semantic Scholar : {len(articles)} résultat(s) pour « {query[:60]}... »")
+    _record_query_stat(query, "semantic_scholar", len(articles))
     return articles
 
 
@@ -1063,6 +1243,7 @@ def fetch_arxiv_search(query: str, max_results: int = 20) -> list[dict[str, Any]
             "collected_at": datetime.now(timezone.utc).isoformat(),
         })
     logger.info(f"   └─ arXiv search : {len(articles)} résultat(s) pour « {query[:60]}... »")
+    _record_query_stat(query, "arxiv", len(articles))
     return articles
 
 
@@ -1167,6 +1348,7 @@ def fetch_broad_web_search(query: str, max_results: int = 10) -> list[dict[str, 
             "collected_at": datetime.now(timezone.utc).isoformat(),
         })
     logger.info(f"   └─ Tavily : {len(articles)} résultat(s) pour « {query[:60]}... »")
+    _record_query_stat(query, "tavily", len(articles))
     return articles
 
 
@@ -1284,6 +1466,7 @@ def fetch_google_patents(query: str, max_results: int = 15) -> list[dict[str, An
                 "collected_at": datetime.now(timezone.utc).isoformat(),
             })
     logger.info(f"   └─ Google Patents : {len(articles)} brevet(s) pour « {query[:60]}... »")
+    _record_query_stat(query, "patents", len(articles))
     return articles
 
 
@@ -1325,6 +1508,7 @@ def fetch_google_news(query: str) -> list[dict[str, Any]] | None:
                 "collected_at": datetime.now(timezone.utc).isoformat()
             })
         logger.info(f"   └─ {len(articles)} article(s) trouvé(s) pour: {query[:50]}...")
+        _record_query_stat(query, "gnews", len(articles))
         return articles
     except (RequestsError, OSError) as e:
         logger.error(f"❌ Erreur réseau Google News: {e}")
@@ -1698,8 +1882,11 @@ def run_scraper(
 
     # Persistance des acteurs decouverts ce run (entreprises/labos non listes
     # dans companies/research_orgs mais aperçus dans les resultats Patents/OpenAlex).
-    # L'utilisateur pourra les valider/rejeter via le menu d'edition au prochain run.
     _save_discovered_actors()
+
+    # Persistance des stats de requetes (cumul inter-runs) + resume Rich
+    _save_query_stats()
+    _print_query_stats_summary()
 
     logger.info(f"✅ Collecte terminée : {len(raw_articles)} nouveaux articles.")
     return {
