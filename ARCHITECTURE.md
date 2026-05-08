@@ -7,34 +7,39 @@ Document destiné aux développeurs qui maintiennent ou étendent le programme.
 ## 1. Vue d'ensemble
 
 ```
-                    ┌──────────────────┐
-                    │     main.py      │   Orchestrateur
-                    │  (entry point)   │   • Charge .env
-                    └─────────┬────────┘   • Pipeline 5 étapes
-                              │             • Catch global → email d'erreur
-        ┌─────────────────────┼──────────────┬──────────┐
-        ▼                     ▼              ▼          ▼
-  ┌────────────┐  ┌─────────────┐  ┌────────────┐  ┌──────────┐
-  │ scraper.py │→ │ ai_filter.py │→ │ archive.py │→ │ mailer.py │
-  └─────┬──────┘  └──────┬──────┘  └──────┬─────┘  └────┬─────┘
-             │                │              │
-             ▼                ▼              ▼
-       ┌──────────┐    ┌──────────┐   ┌────────────┐
-       │ curl_cffi│    │  Gemini  │   │  SMTP TLS  │
-       │feedparser│    │ Flash 2.5│   │ smtp.gmail │
-       └──────────┘    └──────────┘   └────────────┘
-             │                │              │
-             ▼                ▼              ▼
-       Sources web     google.generativeai  Inbox utilisateur
+                        ┌──────────────────┐
+                        │     main.py      │   Orchestrateur
+                        │  (entry point)   │   • Charge .env
+                        └─────────┬────────┘   • Pipeline 5 étapes
+                                  │             • Catch global → email d'erreur
+        ┌─────────────────────────┼──────────────┬──────────┐
+        ▼                         ▼              ▼          ▼
+  ┌────────────┐  ┌──────────────────┐  ┌────────────┐  ┌──────────┐
+  │ scraper.py │→ │   ai_filter.py    │→ │ archive.py │→ │ mailer.py │
+  └─────┬──────┘  └────────┬─────────┘  └──────┬─────┘  └────┬─────┘
+        │                  │                   │             │
+        ▼                  ▼                   ▼             ▼
+  ┌──────────────┐   ┌──────────────┐   ┌────────────┐  ┌────────────┐
+  │ curl_cffi +  │   │   Gemini     │   │  JSON      │  │  SMTP TLS  │
+  │ feedparser + │   │   Flash 2.5  │   │  cumulé    │  │  smtp.gmail│
+  │ proxy_mgr    │   │ + cascade    │   └────────────┘  └────────────┘
+  └──────┬───────┘   │ (38+ models) │
+         │           └──────────────┘
+         ▼
+   8 sources web :
+   RSS, arXiv search, OpenAlex, Crossref, HAL,
+   Semantic Scholar, Tavily, Google Patents, Google News
 
   Données persistées dans data/ :
-    targets.json              (input — concurrents + mots-clés)
-    seen_urls.json            (mémoire des URLs déjà envoyées)
+    targets.json              (input — 5 listes : companies, keywords,
+                               solo_keywords, research_orgs, cross_domain_topics)
+    seen_urls.json            (mémoire FIFO des URLs déjà envoyées, cap 10k)
     scraper_output.json       (sortie étape 2)
     ai_filter_output.json     (sortie étape 3)
     previous_ai_output.json   (snapshot du run précédent)
     scraper_checkpoint.json   (checkpoint partiel pendant le scraping)
-    articles_archive.json     (archive cumulative pour rattrapage)
+    articles_archive.json     (archive cumulative pour rattrapage, cap 5k)
+    discovered_actors.json    (acteurs découverts auto. via Patents/OpenAlex)
 ```
 
 **Mode rattrapage** : `send_recap.py` est un point d'entrée alternatif qui lit `articles_archive.json` et expédie un récapitulatif sans relancer scraping/IA.
@@ -43,214 +48,269 @@ Document destiné aux développeurs qui maintiennent ou étendent le programme.
 
 ## 2. Pipeline détaillé
 
-### Étape 1 — Rotation de l'historique (`main.py:108-125`)
+### Étape 1 — Rotation de l'historique
 
 - Si `data/ai_filter_output.json` existe (run précédent), il est copié vers `data/previous_ai_output.json`.
-- Permet au mailer d'afficher éventuellement une section « la semaine dernière ».
+- Permet au mailer d'afficher la section « Déjà vu la semaine passée » avec les top articles 4★/5★.
 - Échec non-fatal : le run continue même si la copie échoue.
 
 ### Étape 2 — Scraping (`scraper.py:run_scraper`)
 
-**Phase RSS** :
-- Itère sur `SOURCES_RSS` (5 flux : ArXiv ×2, MDPI, IEEE, ScienceDaily)
-- Pour MDPI et ScienceDaily : pré-warm-up de la session (visite de la racine du domaine pour récupérer les cookies Cloudflare)
-- Récupère le XML via `curl_cffi` impersonant Chrome 124
-- Parsing avec `feedparser`
-- Filtre par fraîcheur (`_is_recent`, fenêtre `RECENT_DAYS_LIMIT` jours)
-- Cap à `MAX_ARTICLES_PER_SOURCE` articles par flux
-- Micro-pause gaussienne `gauss(1.0, 0.3)s` entre flux
+8 sources interrogées, dans cet ordre, avec pause inter-source de 3-9 min (`_inter_source_break`) :
+
+| # | Source | Volume req/run (35 ent × 16 kw + 29 solos + 25 labos + 36 cross) | Quota |
+|---|---|---|---|
+| 1 | **RSS** (5 flux : ArXiv ×2, MDPI, IEEE, ScienceDaily) | 5 | aucun |
+| 2 | **arXiv Search API** | ~111 (7 base + kw + solos + orgs + cross) | aucun (politely 3s+) |
+| 3 | **OpenAlex** | ~112 | 100k/jour gratuit |
+| 4 | **Crossref** | ~112 | aucun strict |
+| 5 | **HAL** (CNRS, paires bilingues FR/EN) | ~112 | aucun strict |
+| 6 | **Semantic Scholar** | ~111 | 100/5min sans clé, 1/s avec |
+| 7 | **Tavily Web Search** | ~110 | 1000/mois free tier |
+| 8 | **Google Patents** | ~112 (assignee broadcasté) | aucun officiel |
+| 9 | **Google News** (entreprises × keywords + solos) | ~589 (35×16+29) | soft limit ~500/run |
+
+**Construction des requêtes** (`build_*_queries()`) :
+
+Chaque source a une **base hardcodée** (concepts fondamentaux PVD/CVD/ALD : 5 à 8 lignes selon la source) **plus le broadcast des 4 listes utilisateur** :
+- `keywords` (couplés avec `companies` pour GNews)
+- `solo_keywords` (broadcast partout, GNews inclus)
+- `research_orgs` (broadcast science uniquement, format adapté : `assignee:"X"` pour Patents, `all:"X"` pour arXiv, etc.)
+- `cross_domain_topics` (broadcast science uniquement, focus innovations transférables)
+
+Exemple pour arXiv : `ti:"X" OR abs:"X"` pour chaque entrée. Pour Patents : `assignee:"X"` pour les research_orgs, phrase exacte pour le reste.
 
 **Phase Google News (mode weekend furtif)** :
-- `build_gnews_queries()` génère **1 requête unitaire par couple (entreprise, mot-clé)** :
-  ```
-  "Oerlikon" "PVD"
-  ```
-  WHY le produit cartésien et pas l'OR-grouping : Google News tronque silencieusement les requêtes OR longues et renvoie des résultats génériques. Une requête courte et précise par couple garantit la pertinence, au prix d'un volume plus élevé (compensé par les délais furtifs).
-- Avec 21 entreprises × 14 mots-clés → **294 requêtes** par run.
-- **Délais inter-requêtes humains mixtes** (mode weekend, moyenne ~141s, médiane ~104s) :
+- `build_gnews_queries()` génère **1 requête unitaire par couple (entreprise, mot-clé)** + 1 par solo : ~589 req
+- WHY le produit cartésien : Google News tronque silencieusement les longues OR-grouping. Une requête courte par couple garantit la pertinence
+- **Délais inter-requêtes humains mixtes** (mode weekend, moyenne ~141s) :
   - 15% rapides (20-50s) — humain qui scrolle un titre
   - 50% normaux (60-120s) — humain qui lit un résumé
   - 25% lents (120-300s) — humain qui lit un article complet
   - 10% très lents (5-9 min) — pause téléphone / café
-- **Rotation de session toutes les 30 requêtes** + long break humain de 6-15 min (≈ 10 identités présentées à Google plutôt qu'une seule).
-- **Pause circadienne** : après 6h de run continu, sleep aléatoire de 4-6h (simulation « humain qui dort » — Google ne voit jamais 50 recherches sur 12h non-stop).
-- **Locales rotatives** : 8 variantes hl/gl/ceid (en-US, fr-FR, de-DE, en-GB, fr-CH, en-CA, it-IT, es-ES) tirées au hasard à chaque requête.
-- **Header `Referer: https://www.google.com/`** ajouté à chaque appel (un humain n'arrive jamais sur news.google.com via une URL nue).
-- **Détection précoce de blocage** : si la réponse ne commence pas par `<?xml` → traitement comme un blocage anti-bot.
-- **Circuit breaker à 3 strikes consécutifs** : un blocage isolé déclenche un long break (~25 min) + nouvelle identité, puis on retente. Trois blocages d'affilée → abandon de la source GNews seulement (les 7 autres sources sont préservées et l'email part avec ce qu'on a).
-- Checkpoint `data/scraper_checkpoint.json` tous les 5 appels et avant chaque pause longue (circadienne, recovery).
-- **Budget temps total estimé** : ~18-22h pour les 294 requêtes (compatible avec un run weekend non surveillé).
+- **Rotation de session toutes les 30 requêtes** + long break humain de 6-15 min
+- **Pause circadienne** : après 6h, sleep aléatoire de 4-6h (« humain qui dort »)
+- **Locales rotatives** : 8 variantes hl/gl/ceid tirées au hasard
+- **Header `Referer: https://www.google.com/`** ajouté à chaque appel
+- **Circuit breaker à 3 strikes consécutifs** : abandon GNews mais le pipeline continue
+- Checkpoint `data/scraper_checkpoint.json` tous les 5 appels
+
+**Pré-flight arXiv** (depuis le ban Mai 2026) : 1 requête test au démarrage du bloc arXiv. Si HTTP 429/403 → message clair « ton IP est probablement en cooldown serveur arXiv », le bloc est skippé et OpenAlex/Crossref/etc. couvrent ~85-95% du même corpus. Délai inter-requête arXiv passé à 15-30s + User-Agent identifiable + HTTPS forcé.
+
+**Découverte automatique d'acteurs** (depuis Mai 2026) :
+- À chaque résultat **Patents** : `_record_actor(patent.assignee, "patents")`
+- À chaque résultat **OpenAlex** : `_record_actor(institution.display_name, "openalex")`
+- Filtrage : ignore les acteurs déjà dans `companies` ou `research_orgs`
+- Persistance cumulative dans `data/discovered_actors.json` avec compteur d'occurrences
+- Plus un acteur revient sur plusieurs runs, plus le signal est fort
 
 **Post-traitement** :
-- Dédoublonnage par **URL** : `_normalize_url` strip les params trackers (UTM, fbclid…), le fragment, le slash final, lowercase l'ensemble.
-- Dédoublonnage par **titre** : `_normalize_title` + `_dedup_by_title` capturent le cas où le même article apparaît via deux sources avec des URLs distinctes (RSS + Google News par ex.). Suffixe ` - SourceName` typique de Google News retiré, ponctuation et casse normalisées. En cas de collision, on conserve l'article au résumé le plus long (plus de signal pour l'IA).
-- Si `USE_MEMORY=True` : exclusion des URLs présentes dans `data/seen_urls.json`
-- Mise à jour de `seen_urls.json` (FIFO, max 10 000 entrées)
+- Dédoublonnage par **URL** : `_normalize_url` strip params trackers, fragment, slash final, lowercase
+- Dédoublonnage par **titre** : `_normalize_title` + `_dedup_by_title` capturent le même article via plusieurs sources. En cas de collision, on conserve le résumé le plus long
+- Si `USE_MEMORY=True` : exclusion des URLs présentes dans `seen_urls.json`
+- Tag `was_seen` ajouté à chaque article (utilisé par mailer pour le badge violet « Déjà envoyé » en mode TOUT_RENVOYER)
+- `seen_urls.json` mis à jour (FIFO, max 10 000)
 
-**Sortie** : dict `{meta, articles}` sérialisé en `data/scraper_output.json`
+**Sortie** : dict `{meta, articles}` sérialisé en `data/scraper_output.json`. `_save_discovered_actors()` persiste les acteurs nouvellement vus.
 
 ### Étape 3 — Filtrage IA (`ai_filter.py:filter_articles_with_ai`)
 
 **Découpage** :
-- Articles découpés en batchs de `AI_BATCH_SIZE` (défaut 30 — calibré pour minimiser les appels Gemini sans risque grâce à l'auto-split)
-- 165 articles → 6 batchs (avec batch=30)
+- Articles découpés en batchs de `AI_BATCH_SIZE` (défaut 30)
+- 700 articles → ~16 batchs
 
 **Pour chaque batch** :
-1. `_build_user_prompt` formate les articles avec ID, source, titre, résumé tronqué à 400 chars
-2. `_call_gemini_with_retry(json_mode=True)` appelle Gemini avec :
-   - `response_mime_type="application/json"` (garantit JSON pur, pas de fences markdown)
-   - `max_output_tokens=_MAX_OUTPUT_TOKENS` (32768 — marge pour batchs ≤ 50 articles)
+1. `_build_user_prompt` formate les articles avec ID, source, titre, résumé tronqué à 600 chars
+2. `_call_gemini_with_retry(json_mode=True)` :
+   - `response_mime_type="application/json"` (JSON pur, pas de markdown)
+   - `max_output_tokens=32768` (marge confortable)
    - `temperature=0.1` (déterministe)
-   - Retry exponentiel sur `ResourceExhausted` / `ServiceUnavailable`
-   - Retourne un `_GeminiCallResult(text, truncated)` (NamedTuple)
-3. **Auto-split sur troncature** : si `truncated=True` (finish_reason == MAX_TOKENS) ou JSON malformé, `_process_batch` splitte le batch en 2 moitiés et relance récursivement (cap `_MAX_BATCH_SPLIT_DEPTH=2` → worst case 1+2+4=7 appels). Permet de garder `AI_BATCH_SIZE` permissif sans perdre de batch.
-4. `_parse_json_response` parse en JSON direct + filet de sécurité regex
-5. `_force_company_scores` garantit score ≥ 4 si un concurrent est mentionné dans le titre/résumé (vérification Python indépendante de l'IA)
+   - Retry exponentiel sur quota / service indispo
+3. **Auto-split sur troncature** : si `MAX_TOKENS` ou JSON malformé → split batch en 2 et relance récursivement (cap depth=2)
+4. `_parse_json_response` parse + filet de sécurité regex
+5. `_force_company_scores` garantit score ≥ 4 si concurrent mentionné (vérification Python indépendante de l'IA)
+
+**Nouvelle philosophie scoring (refonte 2026 — voir SCORING.md)** :
+
+Le `SYSTEM_PROMPT` dans `_build_system_prompt()` n'évalue plus seulement « parle-t-il de PVD ? » mais **le potentiel d'INTÉGRATION cross-domaine** : si on prenait cette technologie et qu'on l'appliquait via PVD/ALD, est-ce que ça créerait quelque chose de nouveau ? Cette logique vaut autant pour les articles directement PVD que pour ceux d'autres domaines (photonique, MEMS, biomim, nanotech, IA process control) **transférables**.
+
+Échelle 1-5 :
+- **5** = transférable directement OU concurrent listé avec nouveau produit/brevet
+- **4** = pont innovant (adaptation requise mais potentiel cross-domaine clair)
+- **3** = lecture latérale (à garder en veille)
+- **2** = marginal
+- **1** = hors-sujet
+
+La justification IA doit donner :
+- L'**angle d'intégration** concret (« nanostructures plasmoniques → couleurs structurales décoratives via PVD »)
+- Les **acteurs cités** (entreprises ou labos, même nouveaux pour nous)
+- Le **domaine d'application** quand pertinent (horlogerie, médical, optique...)
 
 **Synthèse finale** :
 - Tri décroissant par score
-- `_generate_executive_summary` fait un appel Gemini supplémentaire (mode texte) sur les 30 meilleurs articles → résumé exécutif global de 3 phrases
+- `_generate_executive_summary` fait un appel Gemini supplémentaire (mode texte) sur les 30 meilleurs → résumé exécutif global de 3 phrases
 
-**Sortie** : dict `{meta: {tldr, retained_count, ...}, articles}` sérialisé en `data/ai_filter_output.json`
+**Sortie** : `data/ai_filter_output.json`
 
 ### Étape 3.5 — Archive cumulative (`archive.py:update_archive`)
 
 - Charge `data/articles_archive.json` (vide si absent)
-- Fusionne les nouveaux articles filtrés en dédupliquant par URL canonique (trim + rstrip "/")
-- Conserve la dernière version (priorité au scoring le plus récent en cas de conflit)
-- Cap à 5 000 entrées (FIFO par date de collecte décroissante)
-- Permet à `send_recap.py` d'envoyer un récapitulatif historique sans relancer le pipeline
+- Fusionne les nouveaux articles filtrés en dédupliquant par URL canonique
+- Conserve la dernière version (priorité au scoring le plus récent)
+- Cap à 5 000 entrées (FIFO)
+- Permet à `send_recap.py` d'envoyer un récap historique sans relancer le pipeline
 
 ### Étape 4 — Envoi email (`mailer.py:send_digest`)
 
-- `MIMEMultipart("alternative")` avec versions HTML + texte brut
-- HTML stylisé inline (badges de score colorés, icônes par source/catégorie)
+- `MIMEMultipart("alternative")` HTML + texte brut
+- HTML stylisé inline (badges colorés, icônes par source)
 - Connexion SMTP STARTTLS sur `smtp.gmail.com:587`
-- Authentification via mot de passe d'application
-- Multi-destinataires supportés (split sur `,`)
-- **Étoiles de score** : composant `_render_stars(score)` génère 5 caractères ★, dichotomie pleine `#F59E0B` (doré) vs vide `#E5E7EB` (gris clair) — standard UX Amazon/Trustpilot
-- **Couleurs de badge** : 5 hues distinctes (violet/vert/bleu/ambre/gris) au lieu d'un dégradé monochromatique
-- **Centrage** : double sécurité `align="center"` + `margin:0 auto` pour compatibilité Outlook
+- Multi-destinataires via `,`
+
+**Sections du digest dans l'ordre** :
+1. **Header + TLDR exécutif** (3 phrases sur les opportunités d'intégration repérées)
+2. **Articles classés par score décroissant** (5★ → 1★ selon `MAIL_MIN_SCORE`)
+3. **🔍 Acteurs découverts automatiquement** (NOUVEAU) : top 15 acteurs les plus fréquents (≥ 2 occurrences cumulées) avec compteur, sources, instructions pour valider via CLI
+4. **⏪ Déjà vu la semaine passée** : top articles 4★/5★ du run précédent
+
+**Composants visuels** :
+- **Étoiles de score** : `_render_stars(score)` — 5 caractères ★, doré `#F59E0B` plein vs `#E5E7EB` vide
+- **Badges score** : 5 hues distinctes (violet/vert/bleu/ambre/gris)
+- **Badge `📌 Déjà envoyé`** (violet) : visible uniquement en mode TOUT_RENVOYER, sur les articles dont `was_seen=True`
+- **Centrage** : double sécurité `align="center"` + `margin:0 auto` (Outlook)
 
 ---
 
 ## 3. Décisions techniques marquantes
 
-### Bypass anti-bot via empreinte TLS
+### Bypass anti-bot via empreinte TLS (curl_cffi)
 
-`curl_cffi` impersonne le handshake TLS de Chrome 124 (suite de chiffres, courbes elliptiques, ALPN, etc.). Cloudflare et autres WAF ne peuvent pas distinguer notre client d'un vrai Chrome. C'est ce qui permet de contourner la protection MDPI sans captcha.
+`curl_cffi` impersonne le handshake TLS de Chrome (rotation `chrome124`/`chrome131`/`chrome120`). Les WAF (Cloudflare, Akamai) ne distinguent pas du vrai Chrome. C'est ce qui permet de contourner MDPI sans captcha.
 
-**Important** : ajouter un proxy intermédiaire **casse cette empreinte** (le proxy renégocie le TLS avec sa propre signature). C'est pourquoi nous n'utilisons pas de proxy.
+**Important** : si on ajoutait un proxy non-résidentiel intermédiaire, ça **casserait l'empreinte TLS** (le proxy renégocie avec sa propre signature, identifiable). C'est pourquoi seuls les **proxies résidentiels** (cf. `proxy_manager.py`) sont utilisables — leur trafic ressemble à un navigateur résidentiel ordinaire.
+
+### Proxy résidentiel avec failover (proxy_manager.py)
+
+Module `src/proxy_manager.py` gère un pool de 1 à 3 proxies chargés depuis `.env` (`RESIDENTIAL_PROXY_PRIMARY/BACKUP/TERTIARY`).
+
+**Architecture** :
+- **Health check au démarrage** : ping `httpbin.org/ip` via chaque proxy
+- **Failover automatique** : si proxy actif échoue (407/timeout/proxy error), bascule vers le suivant sain
+- **Auto-recovery** : un proxy marqué down est retesté après 60s. S'il revient, réactivation automatique
+- **Seuil adaptatif** : 1 seul proxy → 5 échecs avant disable (mode mono-provider tolérant) ; 2-3 proxies → 3 échecs (rotation rapide)
+- **Mode direct fallback** : si tous les proxies sont down, programme tombe en mode direct sans crasher
+- **Geo-targeting** : variable `PROXY_COUNTRY` (CH/FR/DE/...) injecte automatiquement `-country-XX` dans le username (compatible avec IPRoyal, Decodo, Bright Data)
+- **Sécurité credentials** : jamais loggués en clair, masqués `***:***@host:port`
+
+Provider recommandé : **Decodo** (ex-Smartproxy) en mono-provider (~$8.50/GB, $7 minimum).
+
+Test : `python -m src.proxy_manager` → liste les proxies, fait health check, affiche statut.
 
 ### Délais aléatoires gaussiens
 
-Tous les `time.sleep` utilisent `random.gauss(μ, σ)` clampé à un minimum, pas `random.uniform`. La distribution normale ressemble plus au comportement humain (concentration autour de la moyenne, queues fines) qu'une distribution uniforme.
+Tous les `time.sleep` utilisent `random.gauss(μ, σ)` clampé à un minimum, pas `random.uniform`. La distribution normale ressemble plus au comportement humain (concentration autour de la moyenne, queues fines).
 
-### Stratégie Google News : produit cartésien furtif (au lieu de OR-grouping)
+### Stratégie Google News : produit cartésien furtif
 
-Tentative initiale d'OR-grouping (`("A" OR "B" OR ... OR "U") "kw"` → 14 requêtes au lieu de 294) abandonnée : **Google News tronque silencieusement les requêtes OR longues** et renvoie systématiquement les mêmes résultats génériques (souvent les plus populaires sur le mot-clé seul). On perdait 80% de la couverture entreprise.
-
-Choix actuel : produit cartésien complet (294 req) avec délais et anti-détection comportementaux poussés (cf. section anti-bot). Le coût en temps est compensé par la qualité de la couverture — chaque couple (entreprise, mot-clé) reçoit un classement Google News dédié.
+Tentative initiale d'OR-grouping abandonnée car Google News tronque silencieusement les requêtes OR longues. Choix actuel : produit cartésien complet avec délais et anti-détection comportementaux poussés (cf. section anti-bot ci-dessous).
 
 ### Mode JSON natif Gemini
 
-`response_mime_type="application/json"` empêche Gemini de wrapper la réponse dans ` ```json ... ``` `. Critique pour la fiabilité du parsing — sans ça, ~70% des batches échouaient.
+`response_mime_type="application/json"` empêche Gemini de wrapper la réponse dans ` ```json ... ``` `. Critique pour la fiabilité du parsing.
 
-### Chaîne de fallback Gemini en cascade — découverte dynamique
+### Chaîne de fallback Gemini (38+ modèles découverts dynamiquement)
 
-Le free tier Gemini réserve des surprises : `gemini-2.0-flash` et `gemini-2.0-flash-lite` ont parfois un `limit:0` (inaccessibles sans facturation), tandis que `gemini-2.5-flash`, `gemini-2.5-flash-lite` et la famille `gemma-3-*` ont des quotas free réels et indépendants.
+Au premier appel `_init_client()`, le module appelle `genai.list_models()` et énumère **tous les modèles auxquels la clé a accès** (typiquement ~38 : Gemini 2.5 Flash/Lite/Pro, Gemini 2.0 Flash/Lite, Gemini 3 preview, Gemma 3 27B/12B/9B/4B/1B, Gemma 4 preview, etc.).
 
-**Découverte dynamique au boot** (`ai_filter.py:_discover_available_models`) : au premier appel `_init_client()`, le module appelle `genai.list_models()` et énumère **tous les modèles auxquels la clé API a accès** (typiquement ~38 : Gemini 2.5 Flash/Lite/Pro, Gemini 2.0 Flash/Lite, Gemini 3 preview, Gemini 3.1 preview, Gemma 3 (1B/4B/12B/27B), Gemma 4 preview, gemini-flash-latest, etc.).
+La liste est triée selon `_MODEL_PREFERENCE` :
+1. **Tier 1** : `gemini-2.5-flash` → `flash-lite` → `pro`
+2. **Tier 2** : `gemini-2.0-*`
+3. **Tier 3** : `gemini-1.5-*`
+4. **Tier 4** : `gemma-3-*`
+5. **Tier 5** : tout le reste (preview, latest, etc.)
 
-La liste est triée selon une table de préférence projet (`_MODEL_PREFERENCE`) :
-1. **Tier 1 (poids 10-30)** : `gemini-2.5-flash` → `flash-lite` → `pro`
-2. **Tier 2 (poids 40-55)** : `gemini-2.0-flash` → `flash-lite` → `pro` → `flash-thinking`
-3. **Tier 3 (poids 60-70)** : `gemini-1.5-pro` → `1.5-flash` → `1.5-flash-8b`
-4. **Tier 4 (poids 80-98)** : `gemma-3-27b-it` → `12b` → `9b` → `4b` → `1b` → `gemma-2-*`
-5. **Tier 5 (poids 100, queue)** : tout le reste découvert (preview, latest, robotics, lyria, deep-research, etc.) — essayé en dernier recours
+À chaque 429 quota épuisé, `_swap_to_fallback_model()` avance d'un cran. Pipeline ne tombe que si tous les 38+ modèles sont saturés.
 
-À chaque 429 quota épuisé sur le modèle actif, `_swap_to_fallback_model()` avance d'un cran dans la chaîne et redémarre un cycle complet de retries. La chaîne effective contient typiquement **38+ niveaux de fallback** au lieu des 4 fixés statiquement auparavant. Le pipeline ne tombe en panne qu'après épuisement TOTAL de tous les modèles accessibles à la clé.
+**Caveats Gemma** : open-weights, ne supportent pas `response_mime_type=application/json`. Le code détecte le préfixe `gemma` (`_is_gemma`) pour désactiver `response_mime_type` (filet regex post-parsing rattrape les wrappers markdown) et préfixer le prompt système au prompt utilisateur.
 
-Si `list_models()` échoue (réseau coupé, clé restreinte), on retombe sur la chaîne statique de secours `[gemini-2.5-flash-lite, gemma-3-27b-it, gemma-3-12b-it]`.
+### Anti-bot multi-couches (18 couches)
 
-**Caveats Gemma** : modèles open-weights, ne supportent pas `response_mime_type=application/json` ni `system_instruction` au constructeur. Le code détecte le préfixe `gemma` (`_is_gemma`) pour :
-  - désactiver `response_mime_type` (filet regex post-parsing dans `_parse_json_response` rattrape les wrappers markdown)
-  - préfixer le prompt système au prompt utilisateur (sauf appels `prefix_system_prompt=False` — voir ci-dessous)
+1. **TLS impersonation** (curl_cffi rotation chrome124/131/120)
+2. **User-Agent rotatif** (5 UA Win/macOS/Linux × Chrome/Safari)
+3. **Accept-Language varié** (3 variantes re-tirées par session)
+4. **Client Hints Chrome cohérents** (Sec-Ch-Ua-* dynamique selon UA)
+5. **Headers Sec-Fetch-* + Upgrade-Insecure-Requests + DNT**
+6. **Locales Google News rotatives** (8 hl/gl/ceid)
+7. **Header `Referer: https://www.google.com/`** sur GNews
+8. **Shuffle aléatoire** des 589 requêtes GNews
+9. **Délais inter-requêtes mixtes humains** (4 modes : fast 15% / normal 50% / slow 25% / very-slow 10%)
+10. **Multiplicateur nuit ×1.8** (1h-6h heure locale)
+11. **Pauses inter-sources** (3-9 min entre RSS, arXiv, OpenAlex, etc.)
+12. **Rotation session GNews toutes les 30 req** (~10 identités au lieu d'une)
+13. **Long break inter-rotation** (6-15 min)
+14. **Pause circadienne** (après 6h : sleep 4-6h)
+15. **Backoff progressif par domaine** (`_DOMAIN_COOLDOWN`)
+16. **Circuit breaker GNews 3 strikes**
+17. **Warm-up MDPI/ScienceDaily** + détection blocage proactive
+18. **Pré-flight arXiv** + circuit breaker 3 strikes spécifique + UA identifiable + HTTPS
 
-**Bug résumé exécutif corrigé** : avant, `_generate_executive_summary()` recevait sur Gemma le `SYSTEM_PROMPT` (qui exige `{tldr, retained: [...]}`) ET le prompt utilisateur (qui demande un texte de 3 phrases). Gemma satisfaisait les deux en concaténant texte propre + dump JSON, polluant le digest. Fix : nouveau paramètre `prefix_system_prompt=False` pour les appels texte libre + `_sanitize_executive_summary()` qui coupe avant toute fence ` ``` ` ou objet `{"tldr": ...}` résiduel et retire les introductions polluantes (« Voici un résumé : »).
-
-### Sources de collecte multi-canal
-
-Le pipeline interroge cinq familles de sources, dont trois activées par défaut :
-
-| Source | Activation | Force |
-|---|---|---|
-| **RSS (5 flux)** | par défaut | Captures rapides des revues scientifiques (MDPI, ArXiv flux generic, IEEE, ScienceDaily) |
-| **arXiv Search API** | par défaut | Recherche par mot-clé sur **tout** l'index arXiv (pas seulement les ~50 derniers du flux) — 5 requêtes thématiques |
-| **OpenAlex** | par défaut | Base de **250M+** œuvres scientifiques structurées (DOI, concepts, abstracts) — 6 requêtes. Gratuit, sans clé |
-| **Crossref** | par défaut | ~140M œuvres avec DOI — 5 requêtes. Gratuit, sans clé. Le « pool polite » via paramètre `mailto=` donne une priorité d'accès. Note : Crossref a déprécié `from-pub-date` au profit de `filter=from-pub-date:YYYY-MM-DD` (corrigé) |
-| **HAL (CNRS)** | par défaut | Archive ouverte française, particulièrement forte sur **CEA-Leti, CNRS, ONERA** — 5 requêtes. Gratuit, sans clé. Bilingue FR/EN |
-| **Semantic Scholar** | par défaut | ~200M papers enrichis IA — 4 requêtes. Gratuit (rate-limit 1 req/s avec ou sans clé, mais clé = 1 req/s **garanti**, sans clé = bannissement IP fréquent). Fenêtre date élargie à 365 jours côté client (SS classe par pertinence et non par date — sans cet élargissement, le filtre 90j coupait tout) |
-| **Google News RSS** | par défaut | Couvre les communiqués industriels et la presse spécialisée |
-| **Tavily Web** | activé `include_web=True` (graceful sans clé) | Recherche web généraliste pilotée par LLM ; nécessite `TAVILY_API_KEY` (1000 req/mois free) pour produire des résultats |
-
-**Logique anti-doublons** : tous les flux convergent dans `all_articles`, puis `_normalize_url()` strip les paramètres de tracking (UTM, fbclid, etc.), le fragment et le slash final, lowercase le tout. Une page citée par 3 sources différentes avec 3 URLs taggées différemment est dédupliquée à 1 seul article.
-
-Pour pousser plus loin, **Crossref**, **HAL** (CNRS open archive) et **Semantic Scholar** seraient des extensions complémentaires propres à ajouter (mêmes signatures que `fetch_openalex_works`).
-
-### Anti-bot multi-couches (17 couches)
-
-1. **TLS impersonation** : `curl_cffi` reproduit l'empreinte TLS de Chrome (rotation entre `chrome124`/`chrome131`/`chrome120` à la création de session). Cloudflare et autres WAF voient un vrai navigateur.
-2. **User-Agent rotatif** : 5 UA différents (Windows/macOS/Linux × 2 versions Chrome + 1 Safari) re-tirés à chaque obtention de session.
-3. **Accept-Language varié** : 3 variantes, re-tirées à chaque obtention de session.
-4. **Client Hints Chrome cohérents** (`Sec-Ch-Ua`, `Sec-Ch-Ua-Mobile`, `Sec-Ch-Ua-Platform`) : générés dynamiquement à partir du UA tiré (Windows/macOS/Linux + version majeure Chrome). Leur absence est un signal anti-bot fort utilisé par Akamai et Cloudflare modernes.
-5. **Headers Sec-Fetch-* + Upgrade-Insecure-Requests + DNT** : envoyés par tous les navigateurs modernes pour signaler le contexte de navigation. Leur absence indique un client non-navigateur.
-6. **Locales Google News rotatives** : 8 couples (hl/gl/ceid) — en-US, fr-FR, de-DE, en-GB, fr-CH, en-CA, it-IT, es-ES — tirés au hasard à chaque requête GNews. Évite le pattern « toujours en-US ».
-7. **Header `Referer: https://www.google.com/`** sur les appels GNews : un humain arrive sur news.google.com depuis google.com ou via favori, jamais via une URL nue avec query string.
-8. **Shuffle aléatoire de l'ordre des 294 requêtes GNews** (`random.shuffle(queries)`) : un humain ne fait pas Oerlikon×14 keywords puis Bodycote×14 keywords de manière alphabétique. Mélanger casse ce pattern facilement détectable.
-9. **Délais inter-requêtes mixtes humains** : `_humanlike_inter_request_delay()` mélange 4 modes (fast 15% / normal 50% / slow 25% / very-slow 10%) — moyenne ~141s, médiane ~104s, plage [20s, 700s]. Indistinguable d'un humain qui lit/scrolle.
-10. **Multiplicateur nuit ×1.8** sur les délais GNews entre 1h et 6h heure locale (`_is_night_time()`). Un humain insomniaque consulte plus lentement que dans la journée. Les délais nocturnes peuvent dépasser 12 minutes/requête.
-11. **Pauses inter-sources** : 3-9 min entre RSS, arXiv, OpenAlex, Crossref, HAL, Semantic Scholar, Tavily, GoogleNews. Imite un changement d'activité humain.
-12. **Rotation de session GNews toutes les 30 requêtes** : `_reset_session()` détruit la session (cookies + impersonate + UA + Client Hints) et en recrée une avec une nouvelle identité. ~10 identités sont présentées à Google sur un run au lieu d'une seule.
-13. **Long break inter-rotation** : 6-15 min de sommeil entre deux groupes de 30 requêtes (humain qui change d'onglet, lit autre chose).
-14. **Pause circadienne** : après 6h de run GNews continu, sleep aléatoire de 4-6h. Aucun humain ne fait des recherches non-stop pendant 12h+ ; cette pause casse définitivement le pattern « bot 24/7 ».
-15. **Backoff progressif par domaine** (`_DOMAIN_COOLDOWN`) : un 403/429 sur un domaine déclenche une pénalité (60-180s selon le code statut), doublée à chaque récidive. Les autres domaines ne sont pas affectés.
-16. **Circuit breaker GNews à 3 strikes consécutifs** : 1 blocage → long break ~25 min + nouvelle identité, on retente ; 3 blocages d'affilée → abandon GNews pour le run, les 7 autres sources continuent. Évite le bannissement IP par retry agressif.
-17. **Warm-up MDPI/ScienceDaily** + **détection de blocage proactive** : visite de la racine du domaine avant les pages spécifiques (cookies Cloudflare validés). Si la réponse Google News n'est pas du XML, ou si MDPI renvoie du HTML au lieu du flux RSS, on enregistre le blocage **avant** de tenter à nouveau.
-
-**Important** : ne **jamais** ajouter de proxy intermédiaire, cela casse l'empreinte TLS impersonate (le proxy renégocie le TLS avec sa propre signature, identifiable instantanément).
-
-**Risque résiduel honnête** : ces 14 couches abaissent fortement la probabilité de détection mais ne la suppriment pas — l'IP reste fixe (sans proxy résidentiel payant). Le **circuit breaker** est le filet de sécurité ultime : même en cas de blocage, le pipeline n'entre jamais en boucle infinie et ne risque pas de bannissement IP permanent.
+**Couche supplémentaire optionnelle** : proxy résidentiel (cf. proxy_manager.py) — élimine le risque IP-fixe, ~$5-15/mois pour fiabilité 99.5%.
 
 ### Vérification Python double-check des concurrents
 
-Même si l'IA oublie de surclasser un article concurrent, `_force_company_scores` repasse en Python avec une recherche substring case-insensitive sur le titre + résumé. Filet de sécurité indépendant de la qualité du LLM.
+Même si l'IA oublie de surclasser un article concurrent, `_force_company_scores` repasse en Python avec recherche substring case-insensitive. Filet indépendant du LLM.
 
-### Mémoire des URLs vues
+### Mémoire des URLs vues + badge "Déjà envoyé"
 
-Implémentée comme un fichier JSON FIFO de 10 000 URLs max. Permet d'éviter d'envoyer 50 fois le même article si publié sur plusieurs sources. Désactivable via `USE_MEMORY=False`.
+Implémentée comme JSON FIFO de 10 000 URLs max. 3 modes utilisateur :
+- **Filtrer** : exclude les URLs déjà vues (default, recommandé)
+- **Tout renvoyer** : tous les articles passent, badge violet `📌 Déjà envoyé` sur ceux déjà vus auparavant
+- **Reset** : vide `seen_urls.json` puis filtre normal
+
+### Découverte d'acteurs cumulative
+
+`data/discovered_actors.json` agrège inter-runs les noms d'entités vues dans les résultats. Compteur d'occurrences = signal de fréquence. Action 11 du menu d'édition CLI permet la revue interactive (accept→companies, accept→research_orgs, reject).
 
 ---
 
 ## 4. Configuration
 
-| Source | Variable | Défaut | Effet |
-|---|---|---|---|
-| `src/config.py` | `MAX_ARTICLES_PER_SOURCE` | 50 | Cap par flux RSS |
-| `src/config.py` | `RECENT_DAYS_LIMIT` | 90 | Fenêtre de fraîcheur |
-| `src/config.py` | `USE_MEMORY` | True | Filtre les URLs déjà vues |
-| `src/config.py` | `SCRAPE_LIMIT_MONTH` | True | Active le filtre fraîcheur |
-| `data/targets.json` | `companies` | 21 entreprises | Liste des concurrents surveillés |
-| `data/targets.json` | `keywords` | 14 mots-clés | Termes scientifiques |
-| `.env` | `GEMINI_API_KEY` | — | Obligatoire |
-| `.env` | `GEMINI_MODEL` | `gemini-2.5-flash` | Modèle Gemini |
-| `.env` | `AI_BATCH_SIZE` | 30 | Articles par appel Gemini (auto-split en cas de troncature) |
-| `.env` | `GMAIL_USER` | — | Compte SMTP expéditeur |
-| `.env` | `GMAIL_PASSWORD` | — | App password 16 chars |
-| `.env` | `MAIL_RECIPIENT` | `GMAIL_USER` | Liste virgule-séparée |
-| `.env` | `MAIL_MIN_SCORE` | 2 | Score min affiché dans le digest |
-| `.env` | `TAVILY_API_KEY` | — | Optionnelle. Active la recherche Web élargie via Tavily |
-| `.env` | `SEMANTIC_SCHOLAR_API_KEY` | — | Optionnelle. Augmente le rate-limit SS de 1 r/s à 100 r/s |
+### `data/targets.json` (5 listes)
+
+| Liste | Rôle | Cherchée dans |
+|---|---|---|
+| `companies` | Équipementiers industriels | GNews (× keywords) |
+| `keywords` | Mots-clés techniques | GNews (× companies) + 7 sources scientifiques |
+| `solo_keywords` | Phrases multi-mots spécifiques | GNews + 7 sources scientifiques |
+| `research_orgs` | Labos / universités qui publient | 7 sources scientifiques (PAS GNews) |
+| `cross_domain_topics` | Thèmes transversaux (photonique, MEMS, biomim...) | 7 sources scientifiques (PAS GNews) |
+
+### `src/config.py`
+
+| Var | Défaut | Effet |
+|---|---|---|
+| `MAX_ARTICLES_PER_SOURCE` | 50 | Cap par flux RSS |
+| `RECENT_DAYS_LIMIT` | 90 | Fenêtre de fraîcheur |
+| `USE_MEMORY` | True (override par UI) | Filtre URLs déjà vues |
+| `SCRAPE_LIMIT_MONTH` | True | Active le filtre fraîcheur |
+
+### `.env`
+
+| Var | Défaut | Effet |
+|---|---|---|
+| `GEMINI_API_KEY` | — | **Obligatoire** |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Modèle principal de la cascade |
+| `AI_BATCH_SIZE` | 30 | Articles par appel Gemini |
+| `GMAIL_USER` | — | Compte SMTP expéditeur (**obligatoire**) |
+| `GMAIL_PASSWORD` | — | App password 16 chars (**obligatoire**) |
+| `MAIL_RECIPIENT` | `GMAIL_USER` | Liste virgule-séparée |
+| `MAIL_MIN_SCORE` | 2 | Score min affiché |
+| `TAVILY_API_KEY` | — | Optionnelle (1000/mois free) |
+| `SEMANTIC_SCHOLAR_API_KEY` | — | Optionnelle (rate-limit étendu) |
+| **`RESIDENTIAL_PROXY_PRIMARY`** | — | **Optionnelle** Proxy résidentiel principal |
+| **`RESIDENTIAL_PROXY_BACKUP`** | — | **Optionnelle** Proxy backup |
+| **`RESIDENTIAL_PROXY_TERTIARY`** | — | **Optionnelle** 3e proxy (rare) |
+| **`PROXY_COUNTRY`** | `CH` | Code pays geo-targeting |
 
 ---
 
@@ -258,53 +318,49 @@ Implémentée comme un fichier JSON FIFO de 10 000 URLs max. Permet d'éviter d'
 
 | Endroit | Comportement |
 |---|---|
-| `main.py:try/except global` | Toute exception non gérée → `send_error_email()` envoie un mail d'alerte |
-| `scraper.py:fetch_rss_feed` | Catch `RequestsError`, `OSError` → retourne `[]`, le run continue |
-| `scraper.py:fetch_google_news` | Catch idem + détection HTML/non-XML → `None` → abort de la phase GNews mais le pipeline continue |
-| `scraper.py:run_scraper` | Checkpoint `data/scraper_checkpoint.json` tous les 5 appels GNews |
-| `ai_filter.py:_call_gemini_with_retry` | Retry exponentiel sur quota / service indispo (3 tentatives, backoff 2^n) puis cascade dans `FALLBACK_CHAIN`. Chaîne actuelle (4 niveaux) : `gemini-2.5-flash` (principal) → `gemini-2.5-flash-lite` (fallback #1, quotas free séparés) → `gemma-3-27b-it` (fallback #2, open-weights) → `gemma-3-12b-it` (fallback #3, open-weights plus léger). Pour Gemma : `response_mime_type=application/json` désactivé automatiquement, prompt système préfixé manuellement. |
-| `scraper.py:_record_block` + `_respect_domain_cooldown` | Backoff progressif par domaine sur 403/429 : 1er blocage = pénalité base, 2e = ×2, 3e = ×4… Empêche de marteler un site qui vient de nous bloquer. Persiste pour la durée du process. |
-| `scraper.py:fetch_openalex_works` / `fetch_arxiv_search` | Catch `RequestsError`/`OSError` → `[]`, le pipeline continue sans ces sources. |
-| `scraper.py:fetch_broad_web_search` | Tavily désactivé (retour `[]`) si `TAVILY_API_KEY` absente. Erreurs HTTP/réseau non-fatales : pipeline continue sans les résultats web. |
-| `ai_filter.py:_process_batch` | Catch `JSONDecodeError`/`ValueError` → batch ignoré, le pipeline continue |
-| `main.py:Étape 3` | Catch `GeminiUnavailableError` → email envoyé sans filtrage IA |
-| `main.py:Étape 4` | Catch `MailerConfigError`/`MailerSendError` → log uniquement, pas de propagation |
+| `main.py:try/except global` | Toute exception non gérée → `send_error_email()` |
+| `scraper.py:fetch_*` | Catch `RequestsError`/`OSError` → `[]`, pipeline continue |
+| `scraper.py:fetch_arxiv_search` | Retourne `None` sur 429/403 → caller compte les blocages → circuit breaker |
+| `scraper.py:fetch_google_patents` | Robuste : try/except sur format JSON, cooldown 180s sur 403/429, retourne `[]` |
+| `scraper.py:run_scraper` | Checkpoint tous les 5 appels GNews + pré-flight arXiv |
+| `proxy_manager.py` | Pool failover + auto-recovery + fallback mode direct si tous down |
+| `ai_filter.py:_call_gemini_with_retry` | Retry exponentiel + cascade 38+ modèles |
+| `scraper.py:_record_block` | Backoff progressif par domaine |
+| `ai_filter.py:_process_batch` | Auto-split sur troncature (depth max 2) |
+| `main.py:Étape 3` | Catch `GeminiUnavailableError` → email envoyé sans IA |
+| `main.py:Étape 4` | Catch erreur mailer → log uniquement |
 
-**Garantie** : aucun chemin d'erreur ne fait crasher l'orchestrateur sans envoyer une notification (digest ou alerte).
+**Garantie** : aucun chemin d'erreur ne fait crasher l'orchestrateur sans envoyer une notification.
 
 ---
 
 ## 6. Quotas et coûts à surveiller
 
-| Service | Quota free tier | Conso par run |
+| Service | Quota free tier | Conso/run typique |
 |---|---|---|
-| Gemini 2.5 Flash | 250 req/jour (free) | ~7 req (6 batchs + 1 résumé) avec batch=30 et dédup titre |
-| Gemini 2.5 Flash Lite (fallback #1) | 1000 req/jour (free) | activé uniquement si le modèle principal sature |
-| Gemma 3 27B IT (fallback #2) | quotas free indépendants | activé si #1 sature aussi |
-| Gemma 3 12B IT (fallback #3) | quotas free indépendants | dernière roue de secours, activé si #2 sature aussi |
-| OpenAlex (par défaut) | aucune limite pratique, gratuit, sans clé | 6 req/run |
-| arXiv Search API (par défaut) | aucune limite stricte (~3s entre req) | 5 req/run |
-| Crossref (par défaut) | aucune limite pratique avec `mailto=` (pool polite) | 5 req/run |
-| HAL (par défaut) | aucune limite stricte | 5 req/run |
-| Semantic Scholar (par défaut) | 1 req/s sans clé, 100 req/s avec clé | 4 req/run |
-| Tavily Web Search | 1000 req/mois (free) | 4 req/run si `TAVILY_API_KEY` présente |
-| Gmail SMTP | 500 envois/jour | 1 envoi |
-| Google News RSS | aucun officiel | 14 req |
-| ArXiv RSS | aucun strict | 2 req |
-| MDPI/IEEE/ScienceDaily | dépend de Cloudflare | 3 req |
+| Gemini 2.5 Flash | 250 req/jour | ~16 req (15 batchs + 1 résumé exé) |
+| Cascade Gemini fallback | ~38 modèles avec quotas indépendants | activée si saturation |
+| OpenAlex | 100k/jour, sans clé | ~112 |
+| arXiv Search | aucun strict (politely 3s+) | ~111 |
+| Crossref | aucun strict avec `mailto=` | ~112 |
+| HAL | aucun strict | ~112 |
+| Semantic Scholar | 100/5min sans clé | ~111 |
+| Tavily | **1000/mois free** ⚠️ | ~110/run × 5 runs/mois = 550/mois |
+| Google Patents | aucun officiel | ~112 |
+| Google News RSS | aucun officiel, **soft limit ~500/run** | ~589 (au seuil tendu) |
+| Gmail SMTP | 500 envois/jour | 1 |
 
-À la fréquence prévue (1 run/semaine), aucun quota ne pose problème.
+À fréquence 1 run/semaine (~5/mois), tous les quotas sont sous limites.
 
 ---
 
-## 7. Extensions naturelles (non implémentées)
+## 7. Extensions naturelles
 
-- **Section « diff vs semaine dernière »** : `previous_ai_output.json` est conservé mais jamais relu par le mailer
-- **Cache Anthropic-style sur Gemini** : Google ne propose pas de prompt caching natif identique à Anthropic, mais une équivalence existe (Context Caching API)
+- **Section « diff vs semaine dernière »** : `previous_ai_output.json` est conservé, le mailer affiche les top articles 4★/5★ du run précédent dans une section dédiée
+- **Découverte d'acteurs étendue à HAL/Crossref/SS** : actuellement Patents+OpenAlex seulement. Ajouter l'extraction depuis les autres sources scientifiques pour plus de coverage
+- **Cache Anthropic-style sur Gemini** : Google Context Caching API (équivalent du prompt caching Anthropic) pour réduire les coûts/latence sur les SYSTEM_PROMPT longs
 - **Notification Slack/Teams** en plus de l'email
-- **Dashboard web** local avec Streamlit pour explorer l'historique
-
-Aucune n'est requise pour le MVP actuel.
+- **Dashboard web** local avec Streamlit pour explorer l'historique et les acteurs découverts
 
 ---
 
@@ -312,29 +368,35 @@ Aucune n'est requise pour le MVP actuel.
 
 ```
 veille_tech/
-├── main.py                       # Orchestrateur principal (run hebdomadaire)
-├── send_recap.py                 # Rattrapage : envoie l'archive complète
-├── requirements.txt              # Dépendances pip
-├── .env                          # Secrets (NON commité)
-├── CLAUDE.md                     # Directives pour l'agent IA
-├── MANUEL.md                     # Guide utilisateur novice
-├── ARCHITECTURE.md               # Ce document
-├── README.md                     # Intro courte
-├── check.py                      # Utilitaire : liste les modèles Gemini autorisés
+├── main.py                          # Orchestrateur principal (run hebdomadaire)
+├── send_recap.py                    # Rattrapage : envoie l'archive complète
+├── configurer.py                    # Config interactive .env (clés API + proxy)
+├── requirements.txt                 # Dépendances pip
+├── .env                             # Secrets (NON commité)
+├── .env.example                     # Template documenté
+├── CLAUDE.md                        # Directives pour l'agent IA
+├── MANUEL.md                        # Guide utilisateur novice
+├── ARCHITECTURE.md                  # Ce document
+├── SCORING.md                       # Doc public-facing du scoring IA
+├── COMMENT_CA_MARCHE.md             # Vue d'ensemble vulgarisée
+├── README.md                        # Intro courte
+├── check.py                         # Utilitaire : liste les modèles Gemini autorisés
 │
 ├── src/
-│   ├── scraper.py                # Phase 2 — collecte RSS + Google News
-│   ├── ai_filter.py              # Phase 3 — filtrage Gemini
-│   ├── archive.py                # Phase 3.5 — archive cumulative
-│   ├── mailer.py                 # Phase 4 — envoi email HTML
-│   └── config.py                 # Constantes + chargement targets.json
+│   ├── scraper.py                   # Phase 2 — collecte 8 sources + actor extraction
+│   ├── ai_filter.py                 # Phase 3 — filtrage Gemini cross-domaine
+│   ├── archive.py                   # Phase 3.5 — archive cumulative
+│   ├── mailer.py                    # Phase 4 — envoi email HTML (+ section acteurs)
+│   ├── config.py                    # Constantes + chargement targets.json (5 listes)
+│   └── proxy_manager.py             # Pool proxies résidentiels + failover
 │
 └── data/
-    ├── targets.json              # Concurrents + mots-clés (input)
-    ├── seen_urls.json            # Mémoire FIFO des URLs déjà envoyées
-    ├── scraper_output.json       # Sortie phase 2
-    ├── ai_filter_output.json     # Sortie phase 3
-    ├── previous_ai_output.json   # Snapshot run précédent
-    ├── articles_archive.json     # Archive cumulative (alimentée à chaque run)
-    └── scraper_checkpoint.json   # Checkpoint partiel scraping
+    ├── targets.json                 # 5 listes (companies, keywords, solo, orgs, cross)
+    ├── seen_urls.json               # Mémoire FIFO des URLs déjà envoyées
+    ├── scraper_output.json          # Sortie phase 2
+    ├── ai_filter_output.json        # Sortie phase 3
+    ├── previous_ai_output.json      # Snapshot run précédent (pour section "Déjà vu")
+    ├── articles_archive.json        # Archive cumulative (pour rattrapage)
+    ├── scraper_checkpoint.json      # Checkpoint partiel scraping
+    └── discovered_actors.json       # Acteurs découverts auto (Patents/OpenAlex)
 ```

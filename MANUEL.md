@@ -11,11 +11,15 @@ Ce document s'adresse à toute personne qui veut **utiliser** le programme, sans
 Chaque fois que tu le lances, il :
 
 1. **Cherche** sur internet les dernières publications scientifiques et articles de presse sur les revêtements industriels (PVD, CVD, ALD, etc.).
-2. **Surveille les concurrents** listés dans `data/targets.json` (Oerlikon, Ionbond, Platit, etc.).
-3. **Demande à une IA** (Google Gemini) de noter chaque article de 1 à 5 selon sa pertinence.
-4. **T'envoie un email** avec un résumé exécutif et les meilleurs articles, classés par score.
+2. **Surveille les concurrents** listés dans `data/targets.json` (Oerlikon Balzers, Lam Research, Aixtron, Tokyo Electron, ULVAC, Picosun…).
+3. **Découvre automatiquement** les nouveaux acteurs (entreprises et labos) qui apparaissent dans les brevets et papers, même si tu ne les connaissais pas.
+4. **Cherche aussi dans 8+ domaines connexes** (photonique, MEMS, biomim, nanotech, IA, métamatériaux, métasurfaces, etc.) pour repérer les innovations transférables à PVD/ALD.
+5. **Demande à une IA** (Google Gemini) de noter chaque article de 1 à 5 selon le **potentiel d'intégration cross-domaine** avec tes procédés.
+6. **T'envoie un email** avec un résumé exécutif, les meilleurs articles classés par score, et une section dédiée aux acteurs nouvellement découverts.
 
-L'objectif : tu reçois en 5 minutes ce qui t'aurait pris 3 heures à compiler manuellement.
+L'objectif : tu reçois en 5 minutes ce qui t'aurait pris 3 heures à compiler manuellement, AVEC en bonus les pistes d'innovation auxquelles tu n'aurais pas pensé.
+
+> 🆕 **Philosophie 2026** : la note 5★ ne signifie plus « ça parle de PVD » mais « cette découverte, COMBINÉE à PVD/ALD, génère une opportunité d'innovation ». Voir `SCORING.md` pour les détails.
 
 ---
 
@@ -37,11 +41,17 @@ pip install -r requirements.txt
 
 ### 2.3 Préparer le fichier `.env`
 
+> 💡 **Le plus simple** : utilise l'assistant interactif `python configurer.py` qui te guide pas à pas pour chaque champ. Il pré-remplit ce qui existe déjà et te propose garder/modifier/voir.
+
 À la racine du projet, créer un fichier appelé `.env` avec ce contenu :
 
 ```env
 # Clé API Google Gemini (gratuite : https://aistudio.google.com/app/apikey)
 GEMINI_API_KEY=AIza...ta_cle_ici
+
+# Modèle Gemini principal (cascade fallback automatique sur ~38 modèles)
+GEMINI_MODEL=gemini-2.5-flash
+AI_BATCH_SIZE=30
 
 # Compte Gmail expéditeur
 GMAIL_USER=ton.compte@gmail.com
@@ -49,11 +59,24 @@ GMAIL_PASSWORD=xxxx xxxx xxxx xxxx
 
 # Destinataires (séparés par virgule)
 MAIL_RECIPIENT=mahmoud.unjeunearabe@gmail.com,mahmoud.alimohamad@positivecoating.ch
+MAIL_MIN_SCORE=2
 
-# (Optionnel) Clé Tavily pour élargir la recherche au Web académique
-# Inscription gratuite : https://app.tavily.com (1000 requêtes/mois en free tier)
-# Si absente, la recherche Web est simplement désactivée — RSS et Google News continuent normalement.
-# TAVILY_API_KEY=tvly-...
+# (Optionnel) Clé Tavily — recherche Web élargie (1000 req/mois gratuites)
+TAVILY_API_KEY=tvly-...
+
+# (Optionnel) Clé Semantic Scholar — étend le rate-limit (sinon ban IP fréquent)
+SEMANTIC_SCHOLAR_API_KEY=...
+
+# ============================================================
+# 🆕 Proxies résidentiels (FORTEMENT recommandés - anti-blocage)
+# ============================================================
+# Sans ça : ton IP perso est utilisée → risque de ban temporaire arXiv/GNews
+# Avec ça : chaque requête sort par une IP résidentielle différente, indistinguable
+# Provider recommandé : Decodo (https://decodo.com), ~$5-15/mois
+# Format : http://USER:PASS@HOST:PORT
+RESIDENTIAL_PROXY_PRIMARY=
+RESIDENTIAL_PROXY_BACKUP=
+PROXY_COUNTRY=CH
 ```
 
 > ⚠️ `GMAIL_PASSWORD` n'est **pas** ton mot de passe Gmail habituel. C'est un **mot de passe d'application** à 16 caractères :
@@ -61,11 +84,7 @@ MAIL_RECIPIENT=mahmoud.unjeunearabe@gmail.com,mahmoud.alimohamad@positivecoating
 > 2. Créer un nouveau mot de passe pour « Veille Tech »
 > 3. Copier les 16 caractères dans le fichier `.env`
 
-> 💡 **Recherche Web élargie (Tavily) — optionnelle**. Pour activer la recherche au-delà des flux RSS et Google News (utile pour rattraper les papers universitaires non syndiqués), il faut deux choses :
-> 1. Ajouter `TAVILY_API_KEY=...` dans `.env` (clé gratuite sur https://app.tavily.com)
-> 2. Modifier `main.py` ligne `run_scraper(...)` pour passer `include_web=True`
->
-> Sans clé Tavily, le programme tourne normalement avec RSS + Google News (comportement par défaut).
+> 🌐 **Proxy résidentiel — fortement recommandé**. C'est ce qui te garantit de **ne jamais te faire bloquer** par les sources (Google News, arXiv, Patents). Provider conseillé : Decodo (~$7 prépayé = 6+ mois pour notre volume). Sans ça, le programme tourne quand même mais avec un risque de ban temporaire occasionnel. Voir le fichier `.env.example` pour les détails.
 
 ---
 
@@ -149,41 +168,59 @@ Tu verras défiler des logs comme ceci :
                               │
                               ▼
    ┌─────────────────────────────────────────────────────────────┐
+   │  PRE-RUN INTERACTIF                                          │
+   │  • Vérification heure (avert si avant 9h Suisse)             │
+   │  • Choix mémoire : Filtrer / Tout renvoyer / Reset           │
+   │  • Affichage des 5 listes de cibles + édition optionnelle    │
+   │  • Choix volume RSS (5 presets) + estimation durée totale    │
+   │  • 🔒 Vérification quotas API (table colorée 9 sources)      │
+   │  • Récap final + confirmation                                │
+   └─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+   ┌─────────────────────────────────────────────────────────────┐
    │  ÉTAPE 1 — Sauvegarde de l'historique                        │
    │  Le digest précédent est copié dans previous_ai_output.json  │
-   │  pour garder une trace.                                      │
    └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
    ┌─────────────────────────────────────────────────────────────┐
    │  ÉTAPE 2 — Scraping (durée variable selon les sources)       │
    │                                                              │
-   │  Sources interrogées par défaut :                            │
-   │  • 5 flux RSS scientifiques (ArXiv, MDPI, IEEE, ...)         │
-   │  • arXiv Search API : 5 requêtes mots-clés sur tout l'index  │
-   │  • OpenAlex : 6 requêtes sur 250M+ papers académiques        │
-   │  • Google News : recherches concurrent × mot-clé             │
-   │  • (optionnel) Tavily Web si TAVILY_API_KEY présente         │
+   │  9 sources interrogées séquentiellement :                    │
+   │  • 5 flux RSS (ArXiv, MDPI, IEEE, ScienceDaily)              │
+   │  • arXiv Search : ~111 requêtes (broadcast keywords/solos/   │
+   │    research_orgs/cross_domain_topics)                        │
+   │  • OpenAlex / Crossref / HAL / Semantic Scholar : ~111 chaque│
+   │  • Tavily Web (si TAVILY_API_KEY) : ~110                     │
+   │  • Google Patents (NOUVEAU) : ~112 (extraction des assignees)│
+   │  • Google News : ~589 recherches (entreprise × keyword + solos)
    │                                                              │
-   │  Anti-bot : rotation User-Agent + empreinte TLS Chrome,      │
-   │  délais aléatoires, cooldown progressif sur les blocages.    │
+   │  Découverte automatique d'acteurs : extrait les noms de      │
+   │  toutes les entreprises/labos vus dans les résultats Patents │
+   │  et OpenAlex → data/discovered_actors.json (cumulatif)       │
    │                                                              │
-   │  Filtres : articles > 90 jours et déjà envoyés sont ignorés. │
+   │  Anti-bot : 18 couches (TLS Chrome rotation, locales rota-   │
+   │  tives, délais humains, pre-flight arXiv, cooldown progres-  │
+   │  sif, circuit breakers, optionnellement proxy résidentiel).  │
+   │                                                              │
    │  → écrit data/scraper_output.json                            │
    └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
    ┌─────────────────────────────────────────────────────────────┐
-   │  ÉTAPE 3 — Filtrage IA (~2 minutes)                          │
+   │  ÉTAPE 3 — Filtrage IA (philosophie 2026 : transférable)     │
    │                                                              │
-   │  • Découpe les articles en lots de 20                        │
+   │  • Découpe les articles en lots de AI_BATCH_SIZE (défaut 30) │
    │  • Envoie chaque lot à Gemini Flash                          │
-   │  • Gemini note chaque article de 1 à 5                       │
-   │  • Force score ≥ 4 si un concurrent est mentionné            │
+   │  • Gemini évalue le POTENTIEL D'INTEGRATION cross-domaine    │
+   │    (PVD/ALD + photonique/biomim/MEMS/nanotech/IA = ?)        │
+   │  • Note chaque article de 1 à 5 avec angle d'intégration     │
+   │  • Force score ≥ 4 si un concurrent listé est mentionné      │
    │  • Génère un résumé exécutif global                          │
    │                                                              │
-   │  Résilience : si le quota Gemini saute, bascule auto vers    │
-   │  flash-lite, puis Gemma 27B, puis Gemma 12B (4 niveaux).     │
+   │  Résilience : cascade auto sur ~38 modèles (Gemini 2.5/2.0/  │
+   │  1.5, Gemma 3 27B/12B/9B/4B/1B...) si saturation.            │
    │  → écrit data/ai_filter_output.json                          │
    └─────────────────────────────────────────────────────────────┘
                               │
@@ -191,9 +228,14 @@ Tu verras défiler des logs comme ceci :
    ┌─────────────────────────────────────────────────────────────┐
    │  ÉTAPE 4 — Envoi email (~5 secondes)                         │
    │                                                              │
-   │  • Construit un email HTML stylisé                           │
-   │  • Trie les articles par score décroissant                   │
-   │  • Envoie via SMTP Gmail aux destinataires                   │
+   │  Sections du digest :                                        │
+   │  1. Header + résumé exécutif                                 │
+   │  2. Articles classés par score (5★ → 1★)                     │
+   │  3. 🔍 Acteurs DÉCOUVERTS automatiquement (NOUVEAU)          │
+   │  4. ⏪ Déjà vu la semaine passée                              │
+   │                                                              │
+   │  Badge violet 📌 « Déjà envoyé » sur les articles connus     │
+   │  (mode TOUT_RENVOYER uniquement).                            │
    └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -303,16 +345,35 @@ L'ordinateur doit être allumé à l'heure choisie. Sinon, le Planificateur peut
 
 ## 9. Personnalisation rapide
 
-Tous les paramètres sont dans **`src/config.py`** :
+### Paramètres globaux (`src/config.py`)
 
 | Paramètre | Valeur actuelle | Effet |
 |---|---|---|
-| `MAX_ARTICLES_PER_SOURCE` | 50 | Nombre max d'articles pris par flux RSS |
-| `RECENT_DAYS_LIMIT` | 90 | Articles plus vieux ignorés (en jours) |
-| `USE_MEMORY` | False (par défaut) ou choisi à l'Étape 2/4 du lancement interactif | Active le filtre des URLs déjà envoyées |
-| `SCRAPE_LIMIT_MONTH` | True | Active le filtre de fraîcheur |
+| `MAX_ARTICLES_PER_SOURCE` | 50 (modifiable au lancement via les 5 presets) | Cap par flux RSS |
+| `RECENT_DAYS_LIMIT` | 90 | Articles plus vieux ignorés |
+| `USE_MEMORY` | choisi à chaque lancement interactif | Filtre des URLs déjà envoyées |
 
-Pour changer la liste des concurrents ou des mots-clés : éditer **`data/targets.json`**.
+### Cibles de recherche (`data/targets.json`) — 5 listes
+
+| Liste | Rôle | Editable via menu CLI ? |
+|---|---|---|
+| `companies` | Entreprises industrielles (équipementiers PVD/ALD) | ✅ Actions 1/2 |
+| `keywords` | Mots-clés couplés × companies sur Google News | ✅ Actions 3/4 |
+| `solo_keywords` | Phrases multi-mots cherchées seules | ✅ Actions 5/6 |
+| `research_orgs` | Labos / universités qui publient (broadcast science) | ✅ Actions 7/8 |
+| `cross_domain_topics` | Thèmes transversaux (photonique, MEMS, biomim, nanotech, IA, etc.) | ✅ Actions 9/10 |
+
+Pour éditer : lance `python main.py`, accepte de modifier les cibles → tu accèdes à un **menu de 14 actions** organisées par couleur. La numérotation correspond aux paires +/- (ajout/suppression) par liste.
+
+### 🆕 Action 11 — Revoir les acteurs DÉCOUVERTS automatiquement
+
+Pendant les runs, le programme extrait les noms d'entreprises/labos vus dans les résultats Patents et OpenAlex (mais qui ne sont **pas dans tes listes**). Action 11 du menu d'édition affiche un tableau classé par occurrence cumulée. Pour chaque candidat tu tapes :
+- `aN` → ajouter le candidat #N à `companies`
+- `lN` → ajouter le candidat #N à `research_orgs`
+- `rN` → rejeter (retirer des candidats)
+- `q` → quitter la revue
+
+C'est ainsi que ta veille **s'enrichit toute seule** au fil des semaines.
 
 ---
 
@@ -333,13 +394,26 @@ Vérifier que le fichier `.env` existe à la racine et contient bien la ligne `G
 
 ### « Quota API dépassé »
 
-Le free tier de Gemini est limité à 20 requêtes/jour pour `gemini-2.5-flash`. Le programme utilise ~10 requêtes par run. Si tu lances plusieurs fois le même jour, tu peux toucher la limite. Solution :
-- Attendre minuit (heure Pacifique = 9h heure française)
-- Ou activer le pay-as-you-go sur https://aistudio.google.com (~quelques centimes par run)
+Le free tier de `gemini-2.5-flash` est de 250 req/jour. Le programme bascule **automatiquement** sur la cascade de ~38 modèles fallback (Gemini Lite, Gemma 27B/12B…) en cas de saturation. Tu ne perds aucun article. Si vraiment tous les 38 sont épuisés (extrêmement rare), attendre 24h ou activer le pay-as-you-go sur https://aistudio.google.com.
 
-### MDPI renvoie 0 article
+### MDPI renvoie 0 article (timeout)
 
-Notre bypass anti-Cloudflare est efficace mais peut occasionnellement échouer si Cloudflare met à jour ses signatures. Vérifier dans les logs `⚠️ ... a renvoyé du HTML (blocage anti-bot)`. Solution : relancer plus tard, ou changer la valeur d'`impersonate` dans `src/scraper.py` (ex: `chrome120`, `safari17_0`).
+Notre bypass anti-Cloudflare est efficace mais peut occasionnellement échouer si MDPI est lent. Les timeouts ont été augmentés (warm-up 20s, fetch 30s pour MDPI/ScienceDaily) — devrait suffire. Si ça persiste : relancer plus tard, ou changer la valeur d'`impersonate` dans `src/scraper.py` (ex: `chrome120`).
+
+### arXiv search reste bloqué (HTTP 429)
+
+Si tu vois « 🛑 arXiv pre-flight : HTTP 429/403 » : ton IP est temporairement en cooldown serveur arXiv. Ce n'est pas un bug du code (qui a un User-Agent identifiable + HTTPS + délais 15-30s + circuit breaker pré-flight). C'est arXiv qui te demande de patienter. Solutions :
+- **Attendre 4-6h** que la sliding window se reset
+- OU configurer un **proxy résidentiel** (variable `RESIDENTIAL_PROXY_PRIMARY` dans `.env`) qui fait sortir chaque requête par une IP résidentielle différente — élimine ce risque structurellement
+- OU laisser le pipeline continuer : les autres sources (OpenAlex, Crossref, S2) couvrent ~85-95% du même corpus arXiv
+
+### Test du proxy résidentiel
+
+```powershell
+python -m src.proxy_manager
+```
+
+Affiche le pool, fait un health check via httpbin.org, montre l'IP actuelle. Si ✅ tu peux lancer le pipeline. Si ❌, vérifie tes credentials dans `.env`.
 
 ---
 

@@ -1,27 +1,40 @@
 # Veille Technologique Automatisée
 
-Système de veille stratégique industrielle pour le suivi de concurrents et d'innovations en revêtements de surface (PVD / CVD / ALD / sputtering / DLC).
+Système de veille stratégique industrielle pour le suivi de concurrents, d'innovations en revêtements de surface (PVD / CVD / ALD / sputtering / DLC) **et de découvertes transférables** depuis d'autres domaines (photonique, MEMS, biomim, nanotech, IA process, métamatériaux).
 
-Le pipeline collecte des articles depuis 8 sources scientifiques et de presse, les filtre via une cascade de modèles Gemini (38 niveaux de fallback dynamiques), et envoie un digest HTML hebdomadaire scoré 1-5 par email.
+Le pipeline collecte des articles depuis **9 sources** scientifiques et de presse, les filtre via une cascade de modèles Gemini (~38 niveaux de fallback dynamiques) selon une **logique d'innovation transférable cross-domaine**, découvre automatiquement les nouveaux acteurs (entreprises et labos), et envoie un digest HTML hebdomadaire scoré 1-5 par email.
 
-## Sources de collecte
+## Sources de collecte (9 sources)
 
 | Source | Volume typique | Authentification |
 |---|---|---|
 | RSS (ArXiv ×2, MDPI Coatings, IEEE Spectrum, ScienceDaily) | ~200 articles | aucune |
-| arXiv Search API (5 requêtes thématiques) | ~100 articles | aucune |
-| OpenAlex (6 requêtes thématiques) | ~150 articles | aucune (mailto poli) |
-| Crossref (5 requêtes thématiques) | ~100 articles | aucune (mailto poli) |
-| HAL CNRS (5 requêtes thématiques) | ~40 articles | aucune |
-| Semantic Scholar | ~30 articles | clé optionnelle (rate-limit 429 sans) |
-| Tavily Web Search | ~40 articles | clé optionnelle (1000 req/mois free) |
-| Google News RSS (294 requêtes furtives, mode weekend) | ~1000+ articles | aucune |
+| arXiv Search API (~111 requêtes broadcastées) | ~250 articles | aucune (UA identifiable) |
+| OpenAlex (~112 requêtes) | ~300 articles | aucune (mailto poli) |
+| Crossref (~112 requêtes) | ~150 articles | aucune (mailto poli) |
+| HAL CNRS (~112 requêtes bilingues FR/EN) | ~50 articles | aucune |
+| Semantic Scholar (~111 requêtes) | ~30 articles | clé optionnelle |
+| Tavily Web Search (~110 requêtes) | ~40 articles | clé optionnelle (1000 req/mois) |
+| **🆕 Google Patents** (~112 requêtes, extraction assignees) | ~100 brevets | aucune |
+| Google News RSS (~589 requêtes furtives, mode weekend) | ~1500+ articles | aucune |
+
+## Fonctionnalités phares
+
+- **🌐 Recherche cross-domaine** : 36 thèmes pré-remplis (photonique, MEMS, biomim, nanotech, métamatériaux, IA, décoratif) broadcastés sur les 7 sources scientifiques
+- **🔍 Découverte automatique d'acteurs** : extraction continue des entreprises (Patents) et labos (OpenAlex) non listés. Section dédiée dans l'email + revue interactive CLI
+- **🎯 Scoring « innovation transférable »** : l'IA évalue le potentiel d'INTÉGRATION cross-domaine avec PVD/ALD, pas juste la présence de mots-clés
+- **🌐 Proxy résidentiel optionnel** : pool 1-3 proxies + health check + failover + auto-recovery (provider recommandé : Decodo)
+- **🔒 Anti-détection 18 couches** : TLS Chrome impersonation, locales rotatives, délais humains, pause circadienne, pre-flight arXiv, circuit breakers
+- **♻️ Cascade IA ~38 modèles** : Gemini 2.5/3.x/2.0/1.5 + Gemma 3/4 découverts dynamiquement
+- **🧠 Mémoire articles** : 3 modes (Filtrer / Tout renvoyer + badge / Reset), évite les doublons inter-runs
+- **🔒 Vérification quotas pré-run** : panneau coloré avec statut OK/tendu/RISQUE par source
 
 ## Documents
 
-- [`MANUEL.md`](MANUEL.md) — guide utilisateur novice
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — détails techniques (pipeline, anti-bot, fallback, etc.)
-- [`SCORING.md`](SCORING.md) — explication public-facing de la notation IA
+- [`COMMENT_CA_MARCHE.md`](COMMENT_CA_MARCHE.md) — guide novice étape par étape (recommandé pour débuter)
+- [`MANUEL.md`](MANUEL.md) — manuel utilisateur complet
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — détails techniques (pipeline, anti-bot, proxy_manager, cascade Gemini)
+- [`SCORING.md`](SCORING.md) — explication public-facing de la notation IA cross-domaine
 
 ## Installation rapide
 
@@ -38,18 +51,19 @@ python -m venv .venv
 # 3. Installer les dépendances
 pip install -r requirements.txt
 
-# 4. Configurer les secrets
-copy .env.example .env          # Windows
-# cp .env.example .env          # macOS / Linux
-# puis éditer .env avec tes clés API et mot de passe Gmail
+# 4. Configurer les secrets via l'assistant interactif
+python configurer.py
+# (ou : copy .env.example .env puis éditer manuellement)
 ```
 
 ## Lancement
 
 ```bash
-python main.py                                       # Pipeline complet (~18-22h en mode weekend)
+python main.py                                       # Pipeline complet (~14-22h selon les cibles)
 python send_recap.py "alice@x.com,bob@y.com"         # Renvoyer l'archive sans re-scraper
 python send_recap.py "user@x.com" --dry-run          # Générer un preview HTML local
+python -m src.proxy_manager                          # Tester les proxies résidentiels
+python check.py                                      # Lister les modèles Gemini accessibles
 ```
 
 ## Stack technique
@@ -57,12 +71,13 @@ python send_recap.py "user@x.com" --dry-run          # Générer un preview HTML
 - **Python 3.12+** avec annotations de type complètes
 - **`curl_cffi`** pour la furtivité TLS (impersonation Chrome 124/131/120)
 - **`feedparser`** pour le parsing RSS/Atom
-- **`google.generativeai`** avec cascade dynamique sur 38 modèles (Gemini 2.5/3.x/2.0/1.5 + Gemma 3/4)
-- **`smtplib` + Gmail SMTP** pour la livraison (mot de passe d'application requis)
+- **`google.generativeai`** avec cascade dynamique sur ~38 modèles
+- **`smtplib` + Gmail SMTP** pour la livraison (mot de passe d'application)
+- **Proxies résidentiels** (optionnel) : compatible IPRoyal / Decodo / Bright Data
 
-## Anti-détection
+## Anti-détection (18 couches)
 
-17 couches d'anti-détection comportementale (TLS impersonate rotatif, Client Hints Chrome, Sec-Fetch-*, locales rotatives, délais humains mixtes 4 modes, multiplicateur nuit ×1.8, pause circadienne 4-6h, rotation de session toutes les 30 req, shuffle aléatoire des requêtes, circuit breaker à 3 strikes, etc.). Voir `ARCHITECTURE.md` section « Anti-bot multi-couches » pour le détail.
+TLS impersonate rotatif, User-Agent rotatif, Client Hints Chrome cohérents, Sec-Fetch-* + DNT, locales rotatives, délais humains mixtes (4 modes), multiplicateur nuit ×1.8, pause circadienne 4-6h, rotation de session toutes les 30 req, shuffle aléatoire des requêtes, pre-flight arXiv, circuit breakers par source, backoff progressif par domaine, warm-up MDPI/ScienceDaily, optionnellement proxy résidentiel pour fiabilité 99.5%. Voir `ARCHITECTURE.md` section « Anti-bot multi-couches » pour le détail.
 
 ## Licence
 

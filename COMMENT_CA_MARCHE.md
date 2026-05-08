@@ -15,9 +15,11 @@ Ce document explique **étape par étape, en français simple**, ce que fait le 
 ```
 ┌──────────────┐   ┌─────────────┐   ┌──────────────┐   ┌─────────────┐   ┌──────────┐
 │  1. COLLECTE │ → │  2. FILTRE  │ → │  3. NOTATION │ → │  4. RESUME  │ → │ 5. EMAIL │
-│   8 sources  │   │   doublons  │   │   IA 1 a 5   │   │  executif   │   │ HTML pro │
+│  9 sources   │   │   doublons  │   │   IA 1 a 5   │   │  executif   │   │ HTML pro │
 └──────────────┘   └─────────────┘   └──────────────┘   └─────────────┘   └──────────┘
 ```
+
+**Nouveauté 2026** : la philosophie de notation a évolué. L'IA évalue maintenant le **potentiel d'INTÉGRATION cross-domaine** : si une découverte d'un autre domaine (photonique, biomim, MEMS, nanotech...) est combinée à tes procédés PVD/ALD, est-ce que ça crée une innovation ? Voir le fichier `SCORING.md` pour les détails.
 
 À chaque étape, tu vas voir des messages colorés défiler dans la console — c'est normal, c'est le programme qui te tient au courant en temps réel.
 
@@ -115,6 +117,20 @@ Base de 200 millions de papers scientifiques.
 
 Si tu ne mets pas de clé, le programme saute simplement cette source.
 
+#### 🌐 7. Proxy résidentiel (optionnel mais TRÈS recommandé)
+
+Pour ne **jamais te faire bloquer par les sources** (Google News, arXiv, etc.).
+
+**Comment ça marche** : au lieu d'envoyer toutes tes recherches depuis ton IP perso (que les sites peuvent bloquer après quelques centaines de requêtes), tu utilises un proxy résidentiel qui change d'IP à chaque requête. Indistinguable d'un vrai utilisateur.
+
+**Provider recommandé** : Decodo (https://decodo.com).
+- Crée un compte (5 min)
+- Dépose **$7 minimum** (te donne ~6-8 mois d'utilisation pour notre volume)
+- Récupère ton URL au format `http://USER:PASS@gate.decodo.com:7000`
+- Colle-la dans le configurer
+
+Le programme fait un **health check au démarrage** + **failover automatique** si le proxy a un souci. Si tu ne mets rien, le programme tourne en mode direct (ton IP) — fonctionne mais avec un risque de blocage occasionnel.
+
 ---
 
 ## 📅 Quand lancer le programme ? — Conseil important
@@ -149,7 +165,7 @@ Quand tu lances le programme, il te propose **5 presets** :
 
 ## 🤖 Étape 1 : Collecte automatique des articles
 
-Le programme va, **à tour de rôle**, interroger 8 sources différentes :
+Le programme va, **à tour de rôle**, interroger 9 sources différentes :
 
 | Source | Type | Contenu typique |
 |---|---|---|
@@ -160,7 +176,8 @@ Le programme va, **à tour de rôle**, interroger 8 sources différentes :
 | **HAL (CNRS)** | Archive française | Préprints français (CEA-Leti, CNRS, ONERA…) |
 | **Semantic Scholar** | API académique | Papers enrichis IA, résumés auto |
 | **Tavily Web** | Recherche web | Articles industriels et presse spécialisée |
-| **Google News** | Actualités | 294 recherches ciblées (entreprise × mot-clé) |
+| **🆕 Google Patents** | Brevets industriels | Innovations PVD/CVD/ALD avant publication presse (Applied Materials, Lam, etc.) |
+| **Google News** | Actualités | ~589 recherches ciblées (entreprise × mot-clé + solos) |
 
 Tu vois défiler dans la console des messages comme :
 ```
@@ -190,16 +207,30 @@ Tu vois dans la console :
 
 ---
 
-## 🤖 Étape 3 : Notation IA — score 1 à 5
+## 🤖 Étape 3 : Notation IA — score 1 à 5 (philosophie 2026)
 
-Le programme envoie les articles à une IA Google Gemini, par **paquets de 20**. L'IA :
+Le programme envoie les articles à une IA Google Gemini, par **paquets de 30**. L'IA évalue désormais le **potentiel d'INTÉGRATION cross-domaine** :
+
+> Si on prenait cette technologie/découverte et qu'on l'appliquait via PVD ou ALD, est-ce que ça créerait quelque chose de nouveau et utile ?
+
+Cette logique permet de capter les innovations qui viennent d'**autres domaines** (photonique, biomim, MEMS, nanotech, IA) mais qui sont **transférables** à tes procédés. C'est exactement le genre d'opportunités que tu loupais avec l'ancienne approche.
+
+L'IA :
 1. Lit le titre et le résumé de chaque article
-2. Lui donne une note de **1 (peu intéressant) à 5 (innovation majeure)**
-3. Justifie son choix en une phrase
-4. Ajoute des tags (ex: `PVD`, `CEA-Leti`, `couche atomique`)
-5. **Force le score à 4 minimum** si l'article concerne un de tes concurrents (Oerlikon, Ionbond, Platit…)
+2. Lui donne une note de **1 (hors-sujet) à 5 (transférable directement)**
+3. **Justifie en donnant l'angle d'intégration** : « Les nanostructures plasmoniques peuvent être déposées par PVD pour créer des couleurs structurales sur cadrans »
+4. Ajoute des tags (ex: `PVD`, `CEA-Leti`, `couche atomique`, `metasurfaces`)
+5. **Force le score à 4 minimum** si l'article concerne un de tes concurrents (Oerlikon, Lam Research, Aixtron, Tokyo Electron, etc.)
 
-**Si le quota du modèle Gemini s'épuise**, le programme bascule automatiquement vers le modèle suivant dans une liste de **16 modèles de secours** (cascade dynamique). Tu ne perds aucun article.
+**Si le quota du modèle Gemini s'épuise**, le programme bascule automatiquement vers le suivant dans une **cascade dynamique de ~38 modèles** (Gemini 2.5/2.0/1.5, Gemma 3, etc.). Tu ne perds aucun article.
+
+### 🆕 Découverte automatique d'acteurs
+
+Pendant qu'il collecte, le programme **extrait aussi automatiquement les noms des entreprises et labos** qu'il croise dans les résultats :
+- Champ `assignee` des brevets Google Patents (les déposants)
+- Affiliations institutionnelles des auteurs OpenAlex
+
+Ces acteurs **non encore dans tes listes** sont agrégés dans `data/discovered_actors.json` avec un compteur d'occurrences cumulatif. Plus un acteur revient sur plusieurs runs, plus c'est un signal fort. Tu peux les valider/rejeter via l'**action 11 du menu** d'édition CLI.
 
 ---
 
@@ -221,6 +252,9 @@ Tu reçois l'email avec :
 - Le résumé exécutif en haut
 - Les articles classés du plus haut score (5 ⭐) au plus bas
 - Pour chaque article : titre, source, justification IA, tags, lien direct
+- **🆕 Section « 🔍 Acteurs découverts automatiquement »** : top 15 entreprises/labos vus dans les résultats mais pas dans tes listes — candidats à ajouter pour étendre ta veille
+- **Section « ⏪ Déjà vu la semaine passée »** : top articles 4★/5★ du run précédent
+- **🆕 Badge violet « 📌 Déjà envoyé »** : visible UNIQUEMENT en mode TOUT_RENVOYER, pour distinguer les articles déjà reçus auparavant des nouveaux
 
 ---
 
@@ -228,12 +262,13 @@ Tu reçois l'email avec :
 
 | Risque | Protection |
 |---|---|
-| **Détection bot Google** | 17 couches d'anti-détection (TLS Chrome, locales rotatives, délais humains, pause nocturne, etc.) |
-| **Bannissement IP** | Circuit breaker à 3 strikes : si 3 blocages d'affilée, on abandonne Google News (les 7 autres sources continuent) |
-| **Crash Gemini** | Cascade automatique sur 16 modèles |
+| **Détection bot Google** | 18 couches d'anti-détection (TLS Chrome, locales rotatives, délais humains, pause nocturne, pre-flight arXiv, etc.) |
+| **Bannissement IP** | Circuit breaker 3 strikes par source + **proxy résidentiel optionnel** (Decodo) qui élimine ce risque à ~$5/mois |
+| **Crash Gemini** | Cascade automatique sur ~38 modèles découverts dynamiquement |
 | **Crash réseau** | Chaque source qui rate retourne `[]`, pipeline continue |
 | **Crash total** | Email d'alerte automatique sur ton Gmail |
 | **Vol de tes clés API** | `.env` ignoré par git, jamais sur GitHub |
+| **Proxy down en cours de run** | Auto-recovery toutes les 60s + failover vers backup si configuré |
 
 ---
 
@@ -264,6 +299,7 @@ Dans le dossier `data/` :
 | `articles_archive.json` | Historique cumulatif (5000 derniers articles vus) |
 | `seen_urls.json` | Mémoire des URLs déjà envoyées pour ne pas dupliquer |
 | `previous_ai_output.json` | Snapshot du run précédent (utilisé pour la section « la semaine dernière ») |
+| **🆕 `discovered_actors.json`** | Acteurs découverts auto (cumulatif inter-runs) — entreprises/labos vus dans les résultats Patents/OpenAlex |
 
 Tu peux ouvrir n'importe lequel de ces fichiers JSON avec un éditeur de texte ou un navigateur web pour explorer.
 
@@ -286,20 +322,54 @@ C'est tout. **Aucune intervention manuelle** entre les exécutions.
 
 ## 🧠 Pour les curieux : la cascade IA en détail
 
-Le programme essaie les modèles dans cet ordre, en cascade automatique :
+Au démarrage, le programme appelle l'API Google pour **lister TOUS les modèles auxquels ta clé donne accès** (typiquement ~38). Il les trie selon une table de priorité :
 
 ```
-1. gemini-2.5-flash       (rapide, 250/jour)
-2. gemini-2.5-flash-lite  (1000/jour)
-3. gemini-2.5-pro         (très précis, 100/jour)
-4. gemini-3-flash-preview (le tout dernier de Google)
+Tier 1 (rapide, qualité max)
+1. gemini-2.5-flash       (250 req/jour free)
+2. gemini-2.5-flash-lite  (1000 req/jour free)
+3. gemini-2.5-pro         (100 req/jour free)
+
+Tier 2 (Gemini 3 preview)
+4. gemini-3-flash-preview
 5. gemini-3.1-flash-lite-preview
 6. gemini-3-pro-preview
 7. gemini-3.1-pro-preview
-8. gemini-2.0-flash       (200/jour)
-9. ... (et 7 autres fallbacks jusqu'à Gemma 27B)
+
+Tier 3 (Gemini 2.0)
+8. gemini-2.0-flash       (200 req/jour free)
+9. gemini-2.0-flash-lite
+
+Tier 4 (Gemma open-weights, quotas indépendants)
+10. gemma-3-27b-it
+11. gemma-3-12b-it
+12. gemma-3-9b-it
+13. gemma-3-4b-it
+14. gemma-3-1b-it
+
+... (et ~24 autres fallbacks jusqu'à épuisement total)
 ```
 
+À chaque fois qu'un modèle hit son quota, le programme bascule **automatiquement** au suivant. Pipeline ne tombe que si tous les ~38 modèles sont saturés (extrêmement rare).
+
 Pour le **résumé exécutif** (1 seul appel haute valeur), le programme essaie en priorité les modèles **Pro** (qualité maximale) puis bascule.
+
+---
+
+## 🔧 Edition avancée des cibles
+
+Le menu d'édition (lance `python main.py` puis choisis « modifier les cibles ») a 14 actions, organisées en couleurs :
+
+| Action | Couleur | Description |
+|---|---|---|
+| 1 / 2 | vert / jaune | Ajouter / Supprimer une **entreprise** (industriel, couplée avec keywords sur GNews) |
+| 3 / 4 | vert / jaune | Ajouter / Supprimer un **mot-clé COUPLÉ** (× entreprises sur GNews + broadcast science) |
+| 5 / 6 | magenta / jaune | Ajouter / Supprimer un **mot-clé SOLO** (phrase cherchée seule, broadcast partout) |
+| 7 / 8 | bleu / jaune | Ajouter / Supprimer un **labo / organisme** de recherche (broadcast science uniquement) |
+| 9 / 10 | violet / jaune | Ajouter / Supprimer un **thème CROSS-DOMAINE** (photonique, MEMS, biomim, transferable PVD/ALD) |
+| **11** | **cyan** | **🔍 Revoir les acteurs DÉCOUVERTS automatiquement** (validation interactive) |
+| 12 | cyan | Revoir la liste actuelle complète |
+| 13 (défaut) | vert | Sauvegarder et continuer |
+| 14 | jaune | Quitter sans sauvegarder |
 
 **Bonne veille technologique 🛰️**
