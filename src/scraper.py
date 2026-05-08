@@ -236,12 +236,16 @@ def _inter_source_break(label: str) -> None:
     time.sleep(pause)
 
 def _warm_up_session(domain_url: str) -> None:
-    """Visite furtivement la racine d'un domaine pour obtenir des cookies validés (Bypass WAF)."""
+    """Visite furtivement la racine d'un domaine pour obtenir des cookies validés (Bypass WAF).
+
+    Timeout 20s : MDPI/ScienceDaily peuvent etre temporairement lents (> 10s)
+    sans pour autant etre blockes. Mieux vaut attendre que d'echouer le warm-up.
+    """
     session = _get_session()
     try:
         base_url = "/".join(domain_url.split("/")[:3]) # Extrait ex: https://www.mdpi.com
         logger.debug(f"🛡️ Warm-up session pour : {base_url}")
-        session.get(base_url, timeout=10)
+        session.get(base_url, timeout=20)
         time.sleep(max(0.5, random.gauss(2.2, 0.5))) # Pause humaine (loi normale)
     except (RequestsError, OSError) as e:
         logger.warning(f"⚠️ Échec du warm-up pour {domain_url}: {e}")
@@ -322,12 +326,18 @@ def fetch_rss_feed(source: dict[str, str]) -> list[dict[str, Any]]:
     _respect_domain_cooldown(url)
 
     # Pre-flight pour les sites sensibles (MDPI, ScienceDaily)
-    if "mdpi.com" in url or "sciencedaily.com" in url:
+    is_sensitive = "mdpi.com" in url or "sciencedaily.com" in url
+    if is_sensitive:
         _warm_up_session(url)
+
+    # Timeout adapte : sources sensibles parfois lentes (CDN, anti-bot, queue
+    # interne), on tolere jusqu'a 30s avant d'abandonner. Pour les autres
+    # (arXiv, IEEE), 15s suffit largement.
+    fetch_timeout = 30 if is_sensitive else 15
 
     session = _get_session()
     try:
-        response = session.get(url, timeout=15)
+        response = session.get(url, timeout=fetch_timeout)
         if response.status_code in (403, 429):
             _record_block(url, base_seconds=120.0 if response.status_code == 429 else 60.0)
             logger.warning(f"🚫 {name} : statut HTTP {response.status_code} (anti-bot ?)")

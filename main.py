@@ -1286,9 +1286,13 @@ def main() -> None:
         # -----------------------------------------------------------------------
         # Étape 2 : Scraping des articles
         # -----------------------------------------------------------------------
-        logger.info("📡 Lancement du scraping (RSS + arXiv + OpenAlex + Crossref + HAL + Sem.Scholar + GNews + Tavily)...")
+        logger.info(
+            "📡 Lancement du scraping (RSS + arXiv + OpenAlex + Crossref + HAL + "
+            "Sem.Scholar + Tavily + Patents + GNews)..."
+        )
         # include_web=True : si TAVILY_API_KEY est absente, le module fait un graceful skip
         # et le pipeline continue. Aucune raison de désactiver l'option ici.
+        # include_patents=True (par défaut dans run_scraper) : Google Patents activé.
         scraper_result: dict[str, Any] = run_scraper(include_web=True)
         with open(SCRAPER_OUTPUT_PATH, "w", encoding="utf-8") as f:
             json.dump(scraper_result, f, ensure_ascii=False, indent=2)
