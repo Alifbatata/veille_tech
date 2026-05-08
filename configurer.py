@@ -257,6 +257,103 @@ FIELDS: list[Field] = [
         required=False,
         validator=_validate_int_range(5, 50),
     ),
+    # ========================================================================
+    # Proxies residentiels (optionnels, pour fiabilite maximale anti-blocage)
+    # ========================================================================
+    Field(
+        key="RESIDENTIAL_PROXY_PRIMARY",
+        label="🌐 Proxy residentiel PRIMAIRE (optionnel mais recommande)",
+        description=(
+            "URL complete d'un proxy residentiel pour eviter les blocages IP\n"
+            "sur arXiv, Google News, Google Patents et autres sources strictes.\n"
+            "Format : http://USER:PASSWORD@HOST:PORT\n\n"
+            "Sans proxy : le programme utilise ton IP directe (risque de ban\n"
+            "temporaire sur arXiv/GNews apres beaucoup de requetes).\n"
+            "Avec proxy : chaque requete passe par une IP residentielle\n"
+            "differente -> indistinguable d'un vrai utilisateur, robuste long-terme.\n\n"
+            "Providers recommandes (cout ~5-15$/mois pour ton volume) :\n"
+            "  - IPRoyal (https://iproyal.com)        : depot min 1$, 7$/GB\n"
+            "  - Decodo  (https://decodo.com)         : depot min 7$, 8.5$/GB\n"
+            "  - Bright Data (https://brightdata.com) : top qualite mais cher\n\n"
+            "Le programme test ce proxy au demarrage (health check via httpbin.org).\n"
+            "Si la cle est invalide ou le proxy down, il bascule sur le BACKUP."
+        ),
+        url="https://iproyal.com/residential-proxies/",
+        instructions=(
+            "1. Cree un compte sur IPRoyal ou Decodo (5 min)\n"
+            "2. Achete du forfait residentiel (~$5 prepaye = ~700 MB = 6 mois)\n"
+            "3. Dans le dashboard, recupere ton 'gateway endpoint' avec user:pass\n"
+            "4. Format final a coller ici (exemple IPRoyal) :\n"
+            "   http://username:password@geo.iproyal.com:12321\n"
+            "5. OPTIONNEL : si tu prefers tourner sans proxy, laisse vide\n"
+            "   (le programme tourne en mode direct comme avant)"
+        ),
+        required=False,
+        secret=True,
+    ),
+    Field(
+        key="RESIDENTIAL_PROXY_BACKUP",
+        label="🌐 Proxy residentiel BACKUP (optionnel)",
+        description=(
+            "Deuxieme proxy de secours, IDEALEMENT chez un AUTRE provider.\n"
+            "Si ton proxy primaire est down ou epuise son quota, le programme\n"
+            "bascule automatiquement sur celui-ci sans interruption.\n\n"
+            "Format identique au primaire : http://USER:PASSWORD@HOST:PORT\n\n"
+            "Recommande pour fiabilite maximale (option 'jamais bloque').\n"
+            "Si tu n'as qu'un seul provider, laisse ce champ vide."
+        ),
+        instructions=(
+            "1. Idealement, achete un petit forfait chez UN AUTRE provider que\n"
+            "   le primaire (ex : Decodo si primaire = IPRoyal).\n"
+            "2. Diversifier les providers reduit le risque qu'un meme incident\n"
+            "   technique ou commercial bloque les deux a la fois.\n"
+            "3. Si tu n'as qu'un seul provider OU si tu testes, laisse vide."
+        ),
+        required=False,
+        secret=True,
+    ),
+    Field(
+        key="RESIDENTIAL_PROXY_TERTIARY",
+        label="🌐 Proxy residentiel TERTIAIRE (rare, ultra-redondance)",
+        description=(
+            "Troisieme proxy, pour usage industriel critique uniquement.\n"
+            "Si tes 2 premiers sont epuises/down, le programme bascule sur\n"
+            "celui-ci avant d'abandonner et de tomber en mode direct.\n\n"
+            "Pour 99 % des utilisateurs, ce champ est inutile (laisse vide)."
+        ),
+        instructions=(
+            "Laisse vide sauf si tu as un besoin specifique de redondance\n"
+            "renforcee (ex : tu lances le pipeline en production sans surveillance)."
+        ),
+        required=False,
+        secret=True,
+    ),
+    Field(
+        key="PROXY_COUNTRY",
+        label="🗺️ Pays cible des proxies residentiels (optionnel)",
+        description=(
+            "Code ISO 2-lettres du pays preferentiel pour la geolocalisation\n"
+            "des IP residentielles (ex : CH=Suisse, FR=France, DE=Allemagne).\n\n"
+            "Pourquoi ca compte : certaines sources (Google News notamment)\n"
+            "renvoient des resultats different selon la geo de l'IP. Choisir\n"
+            "un pays europeen proche de toi ameliore la pertinence.\n\n"
+            "Si vide, le provider choisit automatiquement (souvent USA par defaut).\n"
+            "La majorite des providers (IPRoyal, Decodo, Bright Data) supportent\n"
+            "le format 'user-country-XX:pass' que le programme injecte automatiquement."
+        ),
+        default="CH",
+        instructions=(
+            "Codes recommandes pour ta veille :\n"
+            "  CH  Suisse        (proximite, latence faible)\n"
+            "  FR  France        (HAL, presse francophone)\n"
+            "  DE  Allemagne     (Fraunhofer, presse industrielle)\n"
+            "  US  Etats-Unis    (couverture maximale generale)\n"
+            "Si tu n'es pas sur, laisse 'CH' ou laisse vide pour ne pas filtrer."
+        ),
+        required=False,
+        validator=lambda v: None if not v or (len(v) == 2 and v.isalpha())
+                          else "Code pays a 2 lettres (ex: CH, FR, DE) ou vide.",
+    ),
 ]
 
 

@@ -122,6 +122,11 @@ def _get_session() -> curl_requests.Session:
     (sans détruire les cookies).
     L'impersonate TLS est tiré une seule fois à la création pour rester cohérent
     avec les cookies (changer d'empreinte casse les WAF qui lient session+TLS).
+
+    Si un proxy résidentiel est configuré (.env : RESIDENTIAL_PROXY_PRIMARY etc.),
+    la session est routée à travers le proxy actif du pool. En cas d'échec proxy
+    en cours de run, le caller peut appeler `_handle_proxy_failure()` qui rotate
+    automatiquement vers le proxy suivant.
     """
     global _persistent_session
     if _persistent_session is None:
@@ -129,6 +134,18 @@ def _get_session() -> curl_requests.Session:
         logger.debug(f"🛡️ Session créée avec impersonate={impersonate}")
         _persistent_session = curl_requests.Session(impersonate=impersonate)
         _persistent_session.cookies.set("CONSENT", "YES+cb.20230501-14-p0.fr+FX+414", domain=".google.com")
+        # Application du proxy actif (si configure). Le ProxyManager est initialise
+        # au premier appel et fait son health check. Si aucun proxy sain : mode direct.
+        try:
+            from .proxy_manager import get_proxy_manager
+        except ImportError:
+            from proxy_manager import get_proxy_manager  # type: ignore
+        proxy_dict = get_proxy_manager().current_proxy_dict()
+        if proxy_dict:
+            _persistent_session.proxies = proxy_dict
+            entry = get_proxy_manager().current_proxy()
+            if entry is not None:
+                logger.info(f"🌐 Session routee via proxy : {entry.name} ({entry.masked_url()})")
     # Reroll headers a chaque get_session (UA + Accept-Language + Client Hints coherents avec UA)
     new_ua = random.choice(ROTATING_USER_AGENTS)
     headers_update: dict[str, str] = {
@@ -147,6 +164,32 @@ def _get_session() -> curl_requests.Session:
     headers_update.update(_client_hints_for(new_ua))
     _persistent_session.headers.update(headers_update)
     return _persistent_session
+
+
+def _handle_proxy_failure(error_kind: str = "unknown") -> bool:
+    """À appeler quand une requête échoue de manière compatible avec un échec proxy
+    (timeout répété, 407, ProxyError). Marque le proxy en faute et tente de rotate.
+
+    Returns:
+        True si on a basculé vers un autre proxy sain (caller doit retry).
+        False si plus aucun proxy sain (caller doit accepter et continuer).
+    """
+    global _persistent_session
+    try:
+        from .proxy_manager import get_proxy_manager
+    except ImportError:
+        from proxy_manager import get_proxy_manager  # type: ignore
+    mgr = get_proxy_manager()
+    if mgr.current_proxy() is None:
+        return False  # mode direct, rien à rotate
+    mgr.mark_failure()
+    logger.warning(f"⚠️ Echec proxy detecte ({error_kind}) — tentative de bascule.")
+    if mgr.rotate():
+        # Reinit la session pour appliquer le nouveau proxy
+        _persistent_session = None
+        return True
+    logger.error("🛑 Plus aucun proxy sain dans le pool.")
+    return False
 
 
 def _reset_session() -> None:
