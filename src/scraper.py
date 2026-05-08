@@ -1265,32 +1265,48 @@ def run_scraper(
     if include_arxiv_search:
         _maybe_inter_source_pause("arXiv")
         ax_queries = build_arxiv_search_queries()
-        logger.info(f"🔬 Lancement arXiv Search : {len(ax_queries)} requêtes thématiques.")
-        # Circuit breaker : si arXiv blackliste l'IP (429/403 consecutifs), on
-        # abandonne arXiv pour ce run plutot que d'attendre 75 cooldowns de 180s.
-        # Les autres sources (OpenAlex, Crossref, etc.) ne sont pas affectees.
-        _ARXIV_MAX_CONSEC_BLOCKS = 3
-        consecutive_blocks = 0
-        for idx, q in enumerate(ax_queries, 1):
-            logger.info(f"🔬 arXiv search [{idx}/{len(ax_queries)}] : « {q[:80]}... »")
-            result = fetch_arxiv_search(q)
-            if result is None:
-                consecutive_blocks += 1
-                if consecutive_blocks >= _ARXIV_MAX_CONSEC_BLOCKS:
-                    logger.error(
-                        f"🛑 arXiv : {_ARXIV_MAX_CONSEC_BLOCKS} blocages consecutifs (429/403) — "
-                        "abandon de arXiv search pour ce run. Les autres sources continuent."
-                    )
-                    break
-            else:
-                consecutive_blocks = 0  # reset si une requete passe
-                all_articles.extend(result)
-            # arXiv recommande >=3s, on monte a 15-30s pour rester ultra-poli
-            # (le 1 req/3s est un MAX, pas un objectif). Plus on attend, moins
-            # on risque de declencher leur rate-limit comportemental.
-            if idx < len(ax_queries):
-                time.sleep(max(12.0, random.gauss(20.0, 5.0)))
-        _executed_blocks.append("arXiv")
+        # Pre-flight : 1 requete test pour detecter un ban IP avant de lancer
+        # 75 requetes qui echoueraient toutes. Economise ~9 min vs circuit breaker.
+        # Si le pre-flight passe : on lance le bloc complet.
+        # Si 429/403 : on skip directement, message clair, le pipeline continue.
+        logger.info(f"🔬 arXiv pre-flight : test connectivite sur 1 requete simple…")
+        preflight = fetch_arxiv_search('ti:"thin film"', max_results=1)
+        if preflight is None:
+            logger.error(
+                "🛑 arXiv pre-flight : HTTP 429/403 — ton IP est probablement en cooldown "
+                "cote serveur arXiv (suite a un ban temporaire). Abandon de arXiv search "
+                "pour CE run. Pas d'inquietude : OpenAlex + Crossref + Semantic Scholar "
+                "couvrent ~85-95%% de l'index arXiv. Reessaie dans 4-6h pour reset."
+            )
+        else:
+            logger.info(
+                f"🔬 arXiv pre-flight OK ({len(preflight)} resultat(s)) — lancement "
+                f"de {len(ax_queries)} requetes thematiques."
+            )
+            # Circuit breaker : si arXiv blackliste l'IP (429/403 consecutifs) en cours
+            # de run (rare apres pre-flight), on abandonne pour preserver le temps.
+            _ARXIV_MAX_CONSEC_BLOCKS = 3
+            consecutive_blocks = 0
+            # Le pre-flight a deja ramene 1 article, on l'inclut dans la collecte.
+            all_articles.extend(preflight)
+            for idx, q in enumerate(ax_queries, 1):
+                logger.info(f"🔬 arXiv search [{idx}/{len(ax_queries)}] : « {q[:80]}... »")
+                result = fetch_arxiv_search(q)
+                if result is None:
+                    consecutive_blocks += 1
+                    if consecutive_blocks >= _ARXIV_MAX_CONSEC_BLOCKS:
+                        logger.error(
+                            f"🛑 arXiv : {_ARXIV_MAX_CONSEC_BLOCKS} blocages consecutifs (429/403) — "
+                            "abandon de arXiv search pour ce run. Les autres sources continuent."
+                        )
+                        break
+                else:
+                    consecutive_blocks = 0  # reset si une requete passe
+                    all_articles.extend(result)
+                # arXiv recommande >=3s, on monte a 15-30s pour rester ultra-poli
+                if idx < len(ax_queries):
+                    time.sleep(max(12.0, random.gauss(20.0, 5.0)))
+            _executed_blocks.append("arXiv")
 
     if include_openalex:
         _maybe_inter_source_pause("OpenAlex")
