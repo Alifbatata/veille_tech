@@ -193,6 +193,92 @@ def _seen_badge() -> str:
 
 
 _PREV_DATA_PATH = os.path.join(os.path.dirname(__file__), "../data/previous_ai_output.json")
+_DISCOVERED_ACTORS_PATH_MAILER = os.path.join(os.path.dirname(__file__), "../data/discovered_actors.json")
+
+
+def _load_top_discovered_actors(min_count: int = 2, max_actors: int = 15) -> list[dict[str, Any]]:
+    """Charge les acteurs découverts les plus fréquents (cumul des runs).
+
+    Filtres :
+    - Seulement les acteurs vus au moins `min_count` fois (signal robuste)
+    - Top `max_actors` triés par count décroissant
+    """
+    if not os.path.exists(_DISCOVERED_ACTORS_PATH_MAILER):
+        return []
+    try:
+        with open(_DISCOVERED_ACTORS_PATH_MAILER, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        actors = list(data.get("actors", {}).values())
+    except (OSError, json.JSONDecodeError):
+        return []
+    actors = [a for a in actors if a.get("count", 0) >= min_count]
+    actors.sort(key=lambda a: a.get("count", 0), reverse=True)
+    return actors[:max_actors]
+
+
+def _render_discovered_actors_section(actors: list[dict[str, Any]]) -> str:
+    """Génère la section 'Acteurs découverts' du digest email.
+
+    S'affiche à la fin du digest, après les articles, juste avant la rétro
+    'Déjà vu la semaine passée'. Liste les entreprises/labos NON présents dans
+    tes listes companies/research_orgs mais qui apparaissent régulièrement
+    dans les résultats Patents/OpenAlex — candidats à ajouter à ta veille.
+    """
+    if not actors:
+        return ""
+
+    rows_html = ""
+    for a in actors:
+        name = escape(a.get("name", "?"))
+        count = a.get("count", 0)
+        srcs = ", ".join(escape(s) for s in a.get("sources", []))
+        rows_html += f"""
+        <tr>
+          <td class="discovered-row" style="padding:8px 16px; border-bottom:1px solid #e8edf0;">
+            <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;">
+              <tr>
+                <td style="font-size:13px; font-weight:600; color:#0c4a6e;">{name}</td>
+                <td style="text-align:right; font-size:11px; color:#64748b; white-space:nowrap;">
+                  <span style="background:#e0f2fe; color:#0369a1; padding:2px 8px; border-radius:2px;
+                               font-weight:700; letter-spacing:.05em;">vu {count}×</span>
+                  &nbsp;·&nbsp; {srcs}
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>"""
+
+    return f"""
+    <tr>
+      <td style="padding:32px 0 16px;">
+        <table role="presentation" cellpadding="0" cellspacing="0"
+              class="discovered-actors-table"
+              style="width:100%; background:#f0f9ff; border:1px solid #bae6fd; border-radius:4px;">
+          <tr>
+            <td class="discovered-actors-header"
+                style="padding:12px 16px; background:#bae6fd; border-bottom:1px solid #7dd3fc; border-radius:4px 4px 0 0;">
+              <span style="font-size:10px; font-weight:700; color:#0c4a6e;
+                           letter-spacing:.1em; text-transform:uppercase;">
+                🔍 Acteurs découverts automatiquement &mdash; candidats à ajouter à ta veille
+              </span>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:12px 16px 4px; font-size:11px; color:#475569; line-height:1.5;">
+              Ces entreprises et laboratoires apparaissent dans les résultats Google Patents
+              et OpenAlex mais ne sont pas (encore) dans tes listes <i>companies</i>/<i>research_orgs</i>.
+              Plus une entrée revient (vu N×), plus c'est un signal robuste qu'il vaut la peine
+              de l'ajouter pour les prochains runs.
+              <br>
+              <span style="color:#94a3b8;">→ Pour valider/rejeter : <code>python main.py</code>
+              → menu d'édition → action 11 (Revoir les acteurs DECOUVERTS)</span>
+            </td>
+          </tr>
+          {rows_html}
+        </table>
+      </td>
+    </tr>"""
+
 
 def _load_previous_top_articles() -> list[dict[str, Any]]:
     """Charge les articles de la semaine passée ayant un score de 4 ou 5."""
@@ -471,6 +557,9 @@ def build_html_email(filtered_data: dict[str, Any]) -> str:
     prev_articles = _load_previous_top_articles()
     prev_section_html = _render_previous_section(prev_articles)
 
+    discovered_actors = _load_top_discovered_actors(min_count=2, max_actors=15)
+    discovered_section_html = _render_discovered_actors_section(discovered_actors)
+
     return f"""<!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -683,6 +772,7 @@ def build_html_email(filtered_data: dict[str, Any]) -> str:
                 {tldr_html}
                 {body_sections}
                 {empty_state}
+                {discovered_section_html}
                 {prev_section_html}
               </table>
             </td>

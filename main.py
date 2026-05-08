@@ -261,10 +261,11 @@ def _interactive_pre_run() -> int | None:
             _nk = len(_t.get("keywords", []))
             _ns = len(_t.get("solo_keywords", []))
             _nr = len(_t.get("research_orgs", []))
+            _nx = len(_t.get("cross_domain_topics", []))
         except (OSError, json.JSONDecodeError):
-            _nc = _nk = _ns = _nr = 0
+            _nc = _nk = _ns = _nr = _nx = 0
         console.print()
-        if not _check_quotas_panel(console, Table, Panel, Confirm, _nc, _nk, _ns, nb, _nr):
+        if not _check_quotas_panel(console, Table, Panel, Confirm, _nc, _nk, _ns, nb, _nr, _nx):
             console.print("[yellow]↩ Retour a l'etape 3 (cibles) pour reduire le volume…[/yellow]\n")
             continue
 
@@ -482,7 +483,7 @@ _QUOTA_TAVILY_PER_RUN_WARN   = 200   # 1000/mois ÷ 5 runs/mois ≈ 200
 
 def _compute_request_counts(
     nb_companies: int, nb_keywords: int, nb_solos: int, nb_per_source: int,
-    nb_research_orgs: int = 0,
+    nb_research_orgs: int = 0, nb_cross_topics: int = 0,
 ) -> dict[str, int]:
     """Estime le nombre de requetes par source pour CE run.
 
@@ -490,42 +491,39 @@ def _compute_request_counts(
     dans scraper.py + le pipeline d'IA filter (batchs configures via
     AI_BATCH_SIZE, defaut 30, lu depuis l'env comme dans ai_filter.py).
 
-    research_orgs sont broadcastes UNIQUEMENT sur les sources scientifiques
-    (arXiv, OpenAlex, Crossref, HAL, S2, Tavily, Patents) et PAS sur GNews
-    (les labos publient peu de communiques de presse).
+    research_orgs et cross_domain_topics sont broadcastes UNIQUEMENT sur les
+    sources scientifiques (arXiv, OpenAlex, Crossref, HAL, S2, Tavily, Patents)
+    et PAS sur GNews. cross_domain_topics ouvrent la decouverte d'innovations
+    transferables vers PVD/ALD (photonique, MEMS, nanotech, biomim, etc.).
     """
     nb_q_gnews = nb_companies * nb_keywords + nb_solos
 
-    # AI_BATCH_SIZE : meme source de verite que ai_filter.py (env, defaut 30)
     try:
         ai_batch_size = max(1, int(os.environ.get("AI_BATCH_SIZE", "30")))
     except ValueError:
         ai_batch_size = 30
 
-    # Estimation grossiere des articles BRUTS collectes
-    # GNews : ~5 articles uniques par requete apres URL + titre dedup
     raw_articles = (
-        nb_per_source * 5      # 5 flux RSS
-        + 100                  # ~20 articles × 5-7 sources thematiques
-        + nb_q_gnews * 5       # ~5 articles uniques/req GNews apres dedup
-        + nb_research_orgs * 8 # ~8 articles uniques/req research_org sur 7 sources
+        nb_per_source * 5
+        + 100
+        + nb_q_gnews * 5
+        + (nb_research_orgs + nb_cross_topics) * 8  # broadcast science (7 sources)
     )
     nb_batches = max(3, int(raw_articles * 0.7 / ai_batch_size))
 
-    # Sources scientifiques : base + keywords + solos + research_orgs
-    sci_extra = nb_keywords + nb_solos + nb_research_orgs
+    # Sources scientifiques : base + keywords + solos + research_orgs + cross_topics
+    sci_extra = nb_keywords + nb_solos + nb_research_orgs + nb_cross_topics
     return {
         "RSS":              5,
-        "arXiv search":     7 + sci_extra,   # 7 base symetriques
+        "arXiv search":     7 + sci_extra,
         "OpenAlex":         6 + sci_extra,
-        "Crossref":         8 + sci_extra,   # 8 base apres split
-        "HAL":              6 + sci_extra,   # 6 base bilingues
-        "Semantic Scholar": 7 + sci_extra,   # 7 base apres split
+        "Crossref":         8 + sci_extra,
+        "HAL":              6 + sci_extra,
+        "Semantic Scholar": 7 + sci_extra,
         "Tavily":           4 + sci_extra,
-        "Google Patents":   8 + sci_extra,   # 8 base + broadcast
-        "Google News":      nb_q_gnews,      # PAS de research_orgs (peu de news)
+        "Google Patents":   8 + sci_extra,
+        "Google News":      nb_q_gnews,
         "Gemini Flash":     nb_batches,
-        # Donnees de transparence
         "_raw_articles_estimate": raw_articles,
         "_ai_batch_size":         ai_batch_size,
     }
@@ -572,7 +570,7 @@ def _estimate_run_duration_h(nb_per_source: int, nb_q: int) -> tuple[float, floa
 def _check_quotas_panel(
     console, Table, Panel, Confirm,
     nb_companies: int, nb_keywords: int, nb_solos: int, nb_per_source: int,
-    nb_research_orgs: int = 0,
+    nb_research_orgs: int = 0, nb_cross_topics: int = 0,
 ) -> bool:
     """Verifie les quotas API pour le run prevu et affiche un tableau pedagogique.
 
@@ -585,7 +583,8 @@ def _check_quotas_panel(
         True si l'utilisateur veut continuer, False pour revenir aux cibles.
     """
     counts = _compute_request_counts(
-        nb_companies, nb_keywords, nb_solos, nb_per_source, nb_research_orgs,
+        nb_companies, nb_keywords, nb_solos, nb_per_source,
+        nb_research_orgs, nb_cross_topics,
     )
 
     t = Table(
@@ -734,6 +733,7 @@ def _show_targets(console, Table, Panel, targets_dict: dict | None = None) -> No
     keywords = sorted(targets.get("keywords", []), key=str.lower)
     solo_keywords = sorted(targets.get("solo_keywords", []), key=str.lower)
     research_orgs = sorted(targets.get("research_orgs", []), key=str.lower)
+    cross_domain_topics = sorted(targets.get("cross_domain_topics", []), key=str.lower)
 
     # Nombre total de requetes GNews = (entreprises × mots-cles couples) + solos
     nb_q = len(companies) * len(keywords) + len(solo_keywords)
@@ -802,6 +802,20 @@ def _show_targets(console, Table, Panel, targets_dict: dict | None = None) -> No
             t4.add_row(str(i), org)
     console.print(t4)
 
+    # Tableau cross_domain_topics (themes transversaux pour decouverte d'innovations)
+    t5 = Table(
+        title=f"🌐  Themes cross-domaine — innovations transferables a PVD/ALD ({len(cross_domain_topics)}){live_suffix}",
+        border_style="bright_magenta",
+    )
+    t5.add_column("#", style="dim", justify="right")
+    t5.add_column("Theme (photonique, MEMS, nanotech, biomim, IA, decoratif...)", style="bright_magenta")
+    if not cross_domain_topics:
+        t5.add_row("—", "[dim](liste vide — aucune recherche transversale)[/dim]")
+    else:
+        for i, topic in enumerate(cross_domain_topics, 1):
+            t5.add_row(str(i), topic)
+    console.print(t5)
+
     # Recommandations — on marque dynamiquement la ligne correspondant a ta config
     # actuelle (basee sur nb_q = entreprises × mots-cles + solos).
     if nb_q == 0:
@@ -853,6 +867,158 @@ def _print_mini_list(console, Table, label: str, items: list[str], color: str) -
     console.print(t)
 
 
+# =============================================================================
+# Acteurs decouverts : revue interactive (action 11 du menu d'edition)
+# =============================================================================
+
+_DISCOVERED_ACTORS_PATH = os.path.join(DATA_DIR, "discovered_actors.json")
+
+
+def _load_discovered_actors_for_review() -> list[dict]:
+    """Charge le fichier des acteurs decouverts trie par count decroissant.
+
+    Filtre : exclut les acteurs deja presents dans companies ou research_orgs
+    en in-memory (l'utilisateur peut les avoir acceptes au cours de la session).
+    """
+    if not os.path.exists(_DISCOVERED_ACTORS_PATH):
+        return []
+    try:
+        with open(_DISCOVERED_ACTORS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        actors = list(data.get("actors", {}).values())
+        actors.sort(key=lambda a: a.get("count", 0), reverse=True)
+        return actors
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def _count_discovered_actors(targets: dict) -> int:
+    """Renvoie le nombre d'acteurs decouverts pertinents non deja dans les listes."""
+    known = set(c.lower() for c in targets.get("companies", []))
+    known.update(o.lower() for o in targets.get("research_orgs", []))
+    return sum(
+        1 for a in _load_discovered_actors_for_review()
+        if a.get("name", "").lower() not in known
+    )
+
+
+def _review_discovered_actors(console, Table, Panel, Prompt, IntPrompt, targets: dict) -> None:
+    """Revue interactive des acteurs decouverts pendant les runs precedents.
+
+    Affiche un tableau classe par occurrences (les plus vus en haut). L'utilisateur
+    peut accepter (-> ajout a companies ou research_orgs) ou rejeter (-> sera
+    re-propose au prochain run) ou ignorer (-> reste dans la liste candidats).
+    """
+    known_companies = set(c.lower() for c in targets.get("companies", []))
+    known_orgs      = set(o.lower() for o in targets.get("research_orgs", []))
+    known           = known_companies | known_orgs
+
+    candidates = [
+        a for a in _load_discovered_actors_for_review()
+        if a.get("name", "").lower() not in known
+    ]
+
+    if not candidates:
+        console.print(Panel(
+            "[dim]Aucun acteur découvert pour le moment.\n\n"
+            "Lance d'abord un run complet (python main.py) — le pipeline va\n"
+            "extraire les déposants Patents et institutions OpenAlex non encore\n"
+            "présents dans tes listes companies/research_orgs. Reviens ici après\n"
+            "le run pour les valider.[/dim]",
+            title="🔍  Acteurs découverts (vide)",
+            border_style="dim",
+        ))
+        console.print()
+        return
+
+    # Affichage sous forme de tableau
+    t = Table(
+        title=f"🔍  Acteurs découverts au fil des runs ({len(candidates)} candidats)",
+        border_style="bright_cyan",
+    )
+    t.add_column("#", style="dim", justify="right")
+    t.add_column("Nom", style="bright_cyan", no_wrap=True)
+    t.add_column("Vu", justify="right", style="bold")
+    t.add_column("Sources", style="dim")
+    t.add_column("Dernière vue", style="dim")
+    for i, a in enumerate(candidates, 1):
+        last_seen = a.get("last_seen", "")[:10]
+        srcs = ", ".join(a.get("sources", []))
+        t.add_row(str(i), a.get("name", "?"), str(a.get("count", 0)), srcs, last_seen)
+    console.print(t)
+    console.print(
+        "  [dim]💡 [bold]Vu[/bold] = nombre d'occurrences cumulees (compte au fil des runs).\n"
+        "  Plus une entree apparait souvent, plus c'est un signal fort.[/dim]\n"
+    )
+
+    while True:
+        choice = Prompt.ask(
+            "  [bold]Que veux-tu faire ?[/bold]\n"
+            "    [bold green]a[/bold green]N  Ajouter l'acteur N a [cyan]companies[/cyan] (ex: a3)\n"
+            "    [bold blue]l[/bold blue]N  Ajouter l'acteur N a [blue]research_orgs[/blue] (ex: l5)\n"
+            "    [bold red]r[/bold red]N  Rejeter (supprime de la liste candidats) (ex: r2)\n"
+            "    [bold cyan]q[/bold cyan]   Retour au menu principal\n"
+            "  [dim](Entree = q quitter la revue)[/dim]",
+            default="q", show_default=False,
+        ).strip().lower()
+        if choice in ("q", ""):
+            return
+        # Parse format "aN" / "lN" / "rN"
+        if len(choice) < 2 or choice[0] not in ("a", "l", "r"):
+            console.print("  [yellow]⚠ Format invalide. Utilise aN / lN / rN / q.[/yellow]")
+            continue
+        try:
+            idx = int(choice[1:])
+        except ValueError:
+            console.print("  [yellow]⚠ Numero invalide.[/yellow]")
+            continue
+        if not (1 <= idx <= len(candidates)):
+            console.print(f"  [yellow]⚠ Numero hors plage (1-{len(candidates)}).[/yellow]")
+            continue
+        actor = candidates[idx - 1]
+        name  = actor.get("name", "")
+        if choice[0] == "a":
+            if name not in targets["companies"]:
+                targets["companies"].append(name)
+                targets["companies"].sort(key=str.lower)
+                console.print(f"  [green]✓ '{name}' ajoute a companies.[/green]")
+            _remove_actor_from_disk(name)
+            candidates.pop(idx - 1)
+        elif choice[0] == "l":
+            if name not in targets["research_orgs"]:
+                targets["research_orgs"].append(name)
+                targets["research_orgs"].sort(key=str.lower)
+                console.print(f"  [blue]✓ '{name}' ajoute a research_orgs.[/blue]")
+            _remove_actor_from_disk(name)
+            candidates.pop(idx - 1)
+        else:  # 'r' = rejet
+            _remove_actor_from_disk(name)
+            candidates.pop(idx - 1)
+            console.print(f"  [red]✓ '{name}' rejete (retire des candidats).[/red]")
+        if not candidates:
+            console.print("  [green]✓ Tous les candidats ont ete traites.[/green]\n")
+            return
+
+
+def _remove_actor_from_disk(name: str) -> None:
+    """Retire un acteur du fichier discovered_actors.json (apres accept ou reject)."""
+    if not os.path.exists(_DISCOVERED_ACTORS_PATH):
+        return
+    try:
+        with open(_DISCOVERED_ACTORS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        actors = data.get("actors", {})
+        # Recherche case-insensitive sur la valeur "name"
+        norm = name.strip().lower()
+        to_delete = [k for k, v in actors.items() if v.get("name", "").lower() == norm]
+        for k in to_delete:
+            del actors[k]
+        with open(_DISCOVERED_ACTORS_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except (OSError, json.JSONDecodeError):
+        pass
+
+
 def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> None:
     """Menu d'edition des cibles : ajouter/supprimer entreprises et mots-cles.
 
@@ -867,37 +1033,47 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
     targets_path = os.path.join(DATA_DIR, "targets.json")
     with open(targets_path, encoding="utf-8") as f:
         targets_disk = json.load(f)
-    # Copie de travail in-memory (modifs uniquement persistees sur action 10).
+    # Copie de travail in-memory (modifs uniquement persistees sur action 13).
     # Tri alphabetique : ainsi l'index affiche correspond toujours a l'index
     # interne, et les suppressions par numero ciblent le bon item.
     targets = {
-        "companies":     sorted(targets_disk.get("companies", []), key=str.lower),
-        "keywords":      sorted(targets_disk.get("keywords", []), key=str.lower),
-        "solo_keywords": sorted(targets_disk.get("solo_keywords", []), key=str.lower),
-        "research_orgs": sorted(targets_disk.get("research_orgs", []), key=str.lower),
+        "companies":           sorted(targets_disk.get("companies", []), key=str.lower),
+        "keywords":            sorted(targets_disk.get("keywords", []), key=str.lower),
+        "solo_keywords":       sorted(targets_disk.get("solo_keywords", []), key=str.lower),
+        "research_orgs":       sorted(targets_disk.get("research_orgs", []), key=str.lower),
+        "cross_domain_topics": sorted(targets_disk.get("cross_domain_topics", []), key=str.lower),
     }
 
     while True:
+        # Compteur d'acteurs decouverts pour afficher dans le menu
+        nb_discovered = _count_discovered_actors(targets)
+
         console.print(Panel(
-            "  [bold green]1[/bold green]  ➕  Ajouter une entreprise [dim](industriel — couple avec keywords sur GNews)[/dim]\n"
-            "  [bold yellow]2[/bold yellow]  ➖  Supprimer une entreprise\n"
-            "  [bold green]3[/bold green]  ➕  Ajouter un mot-cle COUPLE [dim](associe a chaque entreprise sur GNews + broadcast science)[/dim]\n"
-            "  [bold yellow]4[/bold yellow]  ➖  Supprimer un mot-cle couple\n"
-            "  [bold magenta]5[/bold magenta]  ➕  Ajouter un mot-cle SOLO [dim](phrase cherchee SEULE, broadcast partout)[/dim]\n"
-            "  [bold yellow]6[/bold yellow]  ➖  Supprimer un mot-cle SOLO\n"
-            "  [bold blue]7[/bold blue]  ➕  Ajouter un labo / organisme de recherche [dim](broadcast science UNIQUEMENT)[/dim]\n"
-            "  [bold yellow]8[/bold yellow]  ➖  Supprimer un labo / organisme de recherche\n"
-            "  [bold cyan]9[/bold cyan]  📋  Revoir la liste actuelle (in-memory)\n"
-            "  [bold green]10[/bold green] ✅  [green]Sauvegarder et continuer[/green]\n"
-            "  [bold yellow]11[/bold yellow] ↩  [yellow]Quitter sans sauvegarder[/yellow] (annule toutes les modifs)",
+            "  [bold green]1[/bold green]   ➕  Ajouter une entreprise [dim](couple avec keywords sur GNews)[/dim]\n"
+            "  [bold yellow]2[/bold yellow]   ➖  Supprimer une entreprise\n"
+            "  [bold green]3[/bold green]   ➕  Ajouter un mot-cle COUPLE [dim](GNews × entreprises + broadcast science)[/dim]\n"
+            "  [bold yellow]4[/bold yellow]   ➖  Supprimer un mot-cle couple\n"
+            "  [bold magenta]5[/bold magenta]   ➕  Ajouter un mot-cle SOLO [dim](broadcast partout, sans entreprise)[/dim]\n"
+            "  [bold yellow]6[/bold yellow]   ➖  Supprimer un mot-cle SOLO\n"
+            "  [bold blue]7[/bold blue]   ➕  Ajouter un labo / organisme de recherche [dim](broadcast science)[/dim]\n"
+            "  [bold yellow]8[/bold yellow]   ➖  Supprimer un labo / organisme de recherche\n"
+            "  [bold bright_magenta]9[/bold bright_magenta]   ➕  Ajouter un theme CROSS-DOMAINE "
+            "[dim](photonique, MEMS, nanotech, biomim... transferable a PVD/ALD)[/dim]\n"
+            "  [bold yellow]10[/bold yellow]  ➖  Supprimer un theme cross-domaine\n"
+            f"  [bold bright_cyan]11[/bold bright_cyan]  🔍  Revoir les acteurs DECOUVERTS automatiquement "
+            f"[dim](nouveaux deposants/labos repas dans les resultats : "
+            f"[bold]{nb_discovered}[/bold] candidats)[/dim]\n"
+            "  [bold cyan]12[/bold cyan]  📋  Revoir la liste actuelle (in-memory)\n"
+            "  [bold green]13[/bold green]  ✅  [green]Sauvegarder et continuer[/green]\n"
+            "  [bold yellow]14[/bold yellow]  ↩  [yellow]Quitter sans sauvegarder[/yellow] (annule tout)",
             title="✏️  Editer les cibles",
             border_style="yellow",
         ))
         action = Prompt.ask(
             "  [bold]Que veux-tu faire ?[/bold] "
-            "[dim](tape 1-11, Entree = [bold green]10[/bold green] sauvegarder)[/dim]",
-            choices=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"],
-            default="10",
+            "[dim](tape 1-14, Entree = [bold green]13[/bold green] sauvegarder)[/dim]",
+            choices=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14"],
+            default="13",
             show_default=False,
         )
 
@@ -1031,16 +1207,64 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
                 console.print("  [dim]Liste a jour ci-dessous :[/dim]")
                 _print_mini_list(console, Table, "🎓  Organismes de recherche", targets["research_orgs"], "blue")
         elif action == "9":
+            console.print(
+                "  [bold bright_magenta]ℹ Theme CROSS-DOMAINE[/bold bright_magenta] : phrase decrivant un\n"
+                "  domaine technologique transversal (photonique, MEMS, nanotech, biomim, IA, decoratif, etc.)\n"
+                "  qui pourrait etre INTEGRE a tes procedes PVD/ALD pour creer une innovation.\n"
+                "  [yellow]Le scoring IA evalue specifiquement le potentiel d'integration.[/yellow]\n"
+                "  Exemples : 'metasurfaces optical thin film', 'lotus effect superhydrophobic coating',\n"
+                "  'machine learning thin film optimization', 'structural color watch dial coating'.\n"
+                "  [dim]Cherche UNIQUEMENT dans les sources scientifiques (pas GNews).[/dim]\n"
+            )
+            new = Prompt.ask("  [bold]Theme cross-domaine a ajouter[/bold] "
+                             "[dim](phrase descriptive 3+ mots)[/dim]").strip()
+            if new and new not in targets["cross_domain_topics"]:
+                if len(new.split()) < 2:
+                    if not Confirm.ask(
+                        f"  [yellow]⚠ '{new}' a moins de 2 mots — risque de bruit eleve. "
+                        "Confirmer l'ajout ?[/yellow]",
+                        default=False,
+                    ):
+                        console.print("  [dim]↩ Annule, rien ajoute.[/dim]")
+                        continue
+                targets["cross_domain_topics"].append(new)
+                targets["cross_domain_topics"].sort(key=str.lower)
+                console.print(f"\n  [green]✓ Theme ajoute : '{new}'[/green]")
+                _print_mini_list(console, Table, "🌐  Themes cross-domaine",
+                                 targets["cross_domain_topics"], "bright_magenta")
+            elif new in targets["cross_domain_topics"]:
+                console.print(f"  [yellow]⚠ '{new}' est deja dans la liste.[/yellow]")
+            else:
+                console.print("  [yellow]⚠ Saisie vide, rien ajoute.[/yellow]")
+        elif action == "10":
+            if not targets["cross_domain_topics"]:
+                console.print("  [yellow]Aucun theme cross-domaine a supprimer (liste vide).[/yellow]")
+                continue
+            _print_mini_list(console, Table, "🌐  Themes cross-domaine",
+                             targets["cross_domain_topics"], "bright_magenta")
+            idx = IntPrompt.ask("  [bold]Numero du theme cross-domaine a supprimer[/bold] "
+                                "[dim](Entree = [bold cyan]0[/bold cyan] annuler)[/dim]",
+                                default=0, show_default=False)
+            if 1 <= idx <= len(targets["cross_domain_topics"]):
+                removed = targets["cross_domain_topics"].pop(idx - 1)
+                console.print(f"\n  [green]✓ Theme supprime : '{removed}'[/green]")
+                _print_mini_list(console, Table, "🌐  Themes cross-domaine",
+                                 targets["cross_domain_topics"], "bright_magenta")
+        elif action == "11":
+            # Revue des acteurs decouverts automatiquement par le scraping.
+            # L'utilisateur peut accepter (ajout a companies ou research_orgs)
+            # ou rejeter (suppression de la liste de candidats).
+            _review_discovered_actors(console, Table, Panel, Prompt, IntPrompt, targets)
+        elif action == "12":
             # Affiche la liste IN-MEMORY (avec indicateur 'non sauvegarde')
             _show_targets(console, Table, Panel, targets_dict=targets)
             continue
-        elif action == "10":
-            # Tri alphabetique avant ecriture (le in-memory est deja trie, mais
-            # filet de securite au cas ou un append aurait oublie le sort).
+        elif action == "13":
             targets["companies"].sort(key=str.lower)
             targets["keywords"].sort(key=str.lower)
             targets["solo_keywords"].sort(key=str.lower)
             targets["research_orgs"].sort(key=str.lower)
+            targets["cross_domain_topics"].sort(key=str.lower)
             with open(targets_path, "w", encoding="utf-8") as f:
                 json.dump(targets, f, ensure_ascii=False, indent=2)
             console.print(Panel(
@@ -1048,37 +1272,38 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
                 f"   {len(targets['companies'])} entreprise(s), "
                 f"{len(targets['keywords'])} mot(s)-cle(s) couple(s), "
                 f"{len(targets['solo_keywords'])} solo, "
-                f"{len(targets['research_orgs'])} labo(s)\n\n"
+                f"{len(targets['research_orgs'])} labo(s), "
+                f"{len(targets['cross_domain_topics'])} theme(s) cross-domaine\n\n"
                 f"[dim]Ces modifications sont desormais permanentes : elles seront\n"
                 f"utilisees par defaut a chaque prochain lancement du programme.[/dim]",
                 border_style="green",
             ))
             console.print()
-            # Re-import live : patch a la fois le module config (source) et le
-            # module scraper (qui a copie les noms a son import top-level).
-            # Sans patcher scraper, les modifs ne prendraient effet qu'au prochain
-            # lancement du programme.
+            # Re-import live : patch config (source) et scraper (qui a copie les noms).
             try:
                 import src.config as _cfg
                 _cfg.TARGET_COMPANIES = list(targets["companies"])
                 _cfg.KEYWORDS = list(targets["keywords"])
                 _cfg.SOLO_KEYWORDS = list(targets["solo_keywords"])
                 _cfg.RESEARCH_ORGS = list(targets["research_orgs"])
+                _cfg.CROSS_DOMAIN_TOPICS = list(targets["cross_domain_topics"])
                 import src.scraper as _scraper_mod
                 _scraper_mod.TARGET_COMPANIES = list(targets["companies"])
                 _scraper_mod.KEYWORDS = list(targets["keywords"])
                 _scraper_mod.SOLO_KEYWORDS = list(targets["solo_keywords"])
                 _scraper_mod.RESEARCH_ORGS = list(targets["research_orgs"])
+                _scraper_mod.CROSS_DOMAIN_TOPICS = list(targets["cross_domain_topics"])
             except Exception:
                 pass
             return
-        elif action == "11":
+        elif action == "14":
             # Annulation : on n'ecrit rien, l'etat sur disque reste celui d'origine
             modified_companies = targets["companies"] != targets_disk.get("companies", [])
             modified_keywords  = targets["keywords"]  != targets_disk.get("keywords", [])
             modified_solo      = targets["solo_keywords"] != targets_disk.get("solo_keywords", [])
             modified_orgs      = targets["research_orgs"] != targets_disk.get("research_orgs", [])
-            if modified_companies or modified_keywords or modified_solo or modified_orgs:
+            modified_cross     = targets["cross_domain_topics"] != targets_disk.get("cross_domain_topics", [])
+            if modified_companies or modified_keywords or modified_solo or modified_orgs or modified_cross:
                 if not Confirm.ask(
                     "\n  [yellow]Tu as fait des modifications NON sauvegardees. "
                     "Vraiment tout annuler et tout perdre ?[/yellow]\n"
@@ -1199,6 +1424,7 @@ def _show_recap_and_confirm(console, Panel, Confirm, nb_articles: int) -> bool:
     nb_keywords  = len(targets.get("keywords", []))
     nb_solo      = len(targets.get("solo_keywords", []))
     nb_orgs      = len(targets.get("research_orgs", []))
+    nb_cross     = len(targets.get("cross_domain_topics", []))
     nb_q = nb_companies * nb_keywords + nb_solo
 
     mem_label = _memory_choice_label or "mode par defaut (config.py)"
@@ -1208,7 +1434,9 @@ def _show_recap_and_confirm(console, Panel, Confirm, nb_articles: int) -> bool:
         f"  [bold]🎯  Mots-cles SOLO :[/bold] [magenta]{nb_solo}[/magenta]"
         f"{' [dim](aucun)[/dim]' if nb_solo == 0 else ''}\n"
         f"  [bold]🎓  Organismes de recherche :[/bold] [blue]{nb_orgs}[/blue]"
-        f"{' [dim](aucun — recherches scientifiques par labo desactivees)[/dim]' if nb_orgs == 0 else ' [dim](broadcast science uniquement, pas dans GNews)[/dim]'}\n"
+        f"{' [dim](aucun)[/dim]' if nb_orgs == 0 else ' [dim](broadcast science uniquement)[/dim]'}\n"
+        f"  [bold]🌐  Themes cross-domaine :[/bold] [bright_magenta]{nb_cross}[/bright_magenta]"
+        f"{' [dim](aucun — decouverte cross-domaine desactivee)[/dim]' if nb_cross == 0 else ' [dim](potentiel innovation transversale)[/dim]'}\n"
         f"  [bold]📦  Articles par source RSS :[/bold] [cyan]{nb_articles}[/cyan]\n"
         f"  [bold]🔍  Requetes Google News :[/bold] [cyan]{nb_q}[/cyan] "
         f"[dim]({nb_companies}×{nb_keywords} + {nb_solo} solo)[/dim]\n"

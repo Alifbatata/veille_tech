@@ -20,9 +20,9 @@ from curl_cffi.requests import RequestsError
 
 # Chargement de la config locale
 try:
-    from config import KEYWORDS, MAX_ARTICLES_PER_SOURCE, SOURCES_RSS, TARGET_COMPANIES, USE_MEMORY, SCRAPE_LIMIT_MONTH, RECENT_DAYS_LIMIT, SOLO_KEYWORDS, RESEARCH_ORGS
+    from config import KEYWORDS, MAX_ARTICLES_PER_SOURCE, SOURCES_RSS, TARGET_COMPANIES, USE_MEMORY, SCRAPE_LIMIT_MONTH, RECENT_DAYS_LIMIT, SOLO_KEYWORDS, RESEARCH_ORGS, CROSS_DOMAIN_TOPICS
 except ImportError:
-    from src.config import KEYWORDS, MAX_ARTICLES_PER_SOURCE, SOURCES_RSS, TARGET_COMPANIES, USE_MEMORY, SCRAPE_LIMIT_MONTH, RECENT_DAYS_LIMIT, SOLO_KEYWORDS, RESEARCH_ORGS
+    from src.config import KEYWORDS, MAX_ARTICLES_PER_SOURCE, SOURCES_RSS, TARGET_COMPANIES, USE_MEMORY, SCRAPE_LIMIT_MONTH, RECENT_DAYS_LIMIT, SOLO_KEYWORDS, RESEARCH_ORGS, CROSS_DOMAIN_TOPICS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s — %(message)s")
 logger = logging.getLogger("scraper")
@@ -51,6 +51,17 @@ _SEEN_URLS_MAX: int = 10000
 _SEEN_URLS_PATH = os.path.join(os.path.dirname(__file__), "../data/seen_urls.json")
 _CHECKPOINT_PATH = os.path.join(os.path.dirname(__file__), "../data/scraper_checkpoint.json")
 _CHECKPOINT_EVERY: int = 5  # Sauvegarde tous les N appels GNews
+
+# =============================================================================
+# Decouverte d'acteurs : agrege les noms d'entreprises (assignees brevets) et
+# de labos (institutions OpenAlex/Crossref/HAL/SS) trouves pendant le scraping.
+# Permet de decouvrir des entites pertinentes que l'utilisateur n'avait pas
+# listees dans companies/research_orgs. Persiste dans data/discovered_actors.json
+# avec compteur d'occurrences pour identifier les recurrents.
+# =============================================================================
+_DISCOVERED_ACTORS_PATH = os.path.join(os.path.dirname(__file__), "../data/discovered_actors.json")
+# Dict en memoire (key = nom normalise, value = entry dict avec count, sources, etc.)
+_discovered_actors_session: dict[str, dict[str, Any]] = {}
 
 # Cooldown progressif par domaine en cas de 403/429. Empêche de marteler un site qui
 # vient de nous bloquer — on attend de plus en plus longtemps avant de retenter.
@@ -82,6 +93,116 @@ def _record_block(url: str, base_seconds: float = 60.0) -> None:
     new_penalty = max(base_seconds, current_remaining * 2.0)
     _DOMAIN_COOLDOWN[dom] = now + new_penalty
     logger.warning(f"🚧 Blocage détecté sur {dom} — cooldown {new_penalty:.0f}s avant nouvelle requête")
+
+
+# =============================================================================
+# Helpers : decouverte d'acteurs (companies/labos vus dans les resultats)
+# =============================================================================
+
+def _normalize_actor_name(name: str) -> str:
+    """Normalise un nom d'acteur pour le dedup : lowercase + collapse whitespace."""
+    return re.sub(r"\s+", " ", (name or "").strip().lower())
+
+
+def _is_actor_already_known(name: str) -> bool:
+    """True si l'acteur est deja dans companies ou research_orgs (case-insensitive)."""
+    norm = _normalize_actor_name(name)
+    if not norm:
+        return False
+    known = set(_normalize_actor_name(c) for c in (TARGET_COMPANIES or []))
+    known.update(_normalize_actor_name(o) for o in (RESEARCH_ORGS or []))
+    return norm in known
+
+
+def _record_actor(name: str, source: str) -> None:
+    """Enregistre une occurrence d'acteur (entreprise/labo) trouve pendant le scraping.
+
+    Filtres :
+    - Nom vide / None : ignore
+    - Acteur deja dans tes listes (companies/research_orgs) : ignore (pas une decouverte)
+    - Nom < 3 caracteres ou > 200 : ignore (probablement bruit)
+
+    Args:
+        name: nom brut tel que rapporte par la source (ex: "Empa", "Politecnico di Torino")
+        source: nom de la source (ex: "patents", "openalex"), ajoute a la liste sources
+    """
+    name_clean = (name or "").strip()
+    if not name_clean or len(name_clean) < 3 or len(name_clean) > 200:
+        return
+    if _is_actor_already_known(name_clean):
+        return
+    norm = _normalize_actor_name(name_clean)
+    entry = _discovered_actors_session.get(norm)
+    if entry is None:
+        _discovered_actors_session[norm] = {
+            "name":       name_clean,  # Garde la casse d'origine pour affichage
+            "count":      1,
+            "sources":    [source],
+            "first_seen": datetime.now(timezone.utc).isoformat(),
+            "last_seen":  datetime.now(timezone.utc).isoformat(),
+        }
+    else:
+        entry["count"] += 1
+        if source not in entry["sources"]:
+            entry["sources"].append(source)
+        entry["last_seen"] = datetime.now(timezone.utc).isoformat()
+
+
+def _load_discovered_actors() -> dict[str, dict[str, Any]]:
+    """Charge l'historique cumulatif des acteurs decouverts depuis disque."""
+    if not os.path.exists(_DISCOVERED_ACTORS_PATH):
+        return {}
+    try:
+        with open(_DISCOVERED_ACTORS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("actors", {})
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning(f"⚠️ Lecture {_DISCOVERED_ACTORS_PATH} : {e}")
+        return {}
+
+
+def _save_discovered_actors() -> None:
+    """Persiste les acteurs trouves ce run dans data/discovered_actors.json.
+
+    Merge avec l'historique : si l'acteur etait deja vu lors de runs precedents,
+    on incremente son count cumulatif et on met a jour last_seen. Sinon nouvelle entree.
+    Le fichier sert de memoire entre runs : un acteur qui revient 5 fois sur 4 runs
+    est un signal fort, l'utilisateur peut decider de l'ajouter a sa liste.
+    """
+    if not _discovered_actors_session:
+        return
+    historical = _load_discovered_actors()
+    for norm, session_entry in _discovered_actors_session.items():
+        hist_entry = historical.get(norm)
+        if hist_entry is None:
+            historical[norm] = session_entry.copy()
+        else:
+            hist_entry["count"] = hist_entry.get("count", 0) + session_entry["count"]
+            hist_entry["last_seen"] = session_entry["last_seen"]
+            for src in session_entry["sources"]:
+                if src not in hist_entry.get("sources", []):
+                    hist_entry.setdefault("sources", []).append(src)
+    try:
+        os.makedirs(os.path.dirname(_DISCOVERED_ACTORS_PATH), exist_ok=True)
+        with open(_DISCOVERED_ACTORS_PATH, "w", encoding="utf-8") as f:
+            json.dump(
+                {"actors": historical, "last_updated": datetime.now(timezone.utc).isoformat()},
+                f, ensure_ascii=False, indent=2,
+            )
+        logger.info(
+            f"🔍 Decouverte d'acteurs : {len(_discovered_actors_session)} nouveaux acteurs "
+            f"ce run, {len(historical)} cumules historiquement."
+        )
+    except OSError as e:
+        logger.warning(f"⚠️ Impossible de sauver {_DISCOVERED_ACTORS_PATH} : {e}")
+
+
+def get_session_discovered_actors() -> list[dict[str, Any]]:
+    """Renvoie les acteurs decouverts CE run, triés par count décroissant.
+    Utilise par mailer.py pour la section 'Acteurs decouverts'."""
+    actors = list(_discovered_actors_session.values())
+    actors.sort(key=lambda a: a.get("count", 0), reverse=True)
+    return actors
 
 def _client_hints_for(user_agent: str) -> dict[str, str]:
     """Construit les Client Hints Chrome (Sec-Ch-Ua-*) cohérents avec un User-Agent.
@@ -436,14 +557,15 @@ def build_openalex_queries() -> list[str]:
         '"thin film coating" OR "hard coating" OR DLC',
         '"surface treatment" tribology',
     ]
-    # Broadcast : on cherche aussi chaque mot-cle (couple), chaque solo et
-    # chaque organisme de recherche (research_org) dans OpenAlex.
-    # Les research_orgs sont cibles via leur nom : ca trouve les papers ou
-    # le labo apparait dans les affiliations d'auteurs ou le texte.
+    # Broadcast : on cherche aussi chaque mot-cle (couple), chaque solo,
+    # chaque organisme de recherche et chaque cross_domain_topic dans OpenAlex.
+    # Les cross_domain_topics ouvrent la decouverte d'innovations transferables
+    # depuis d'autres domaines (photonique, MEMS, nanotech, biomim) vers PVD/ALD.
     kw_q    = [f'"{kw}"' for kw in (KEYWORDS or [])]
     solo_q  = [f'"{kw}"' for kw in (SOLO_KEYWORDS or [])]
     org_q   = [f'"{org}"' for org in (RESEARCH_ORGS or [])]
-    return list(dict.fromkeys(base + kw_q + solo_q + org_q))
+    cross_q = [f'"{topic}"' for topic in (CROSS_DOMAIN_TOPICS or [])]
+    return list(dict.fromkeys(base + kw_q + solo_q + org_q + cross_q))
 
 
 def fetch_openalex_works(query: str, max_results: int = 25) -> list[dict[str, Any]]:
@@ -521,6 +643,16 @@ def fetch_openalex_works(query: str, max_results: int = 25) -> list[dict[str, An
         primary_loc = work.get("primary_location") or {}
         venue = (primary_loc.get("source") or {}).get("display_name") or "OpenAlex"
 
+        # Extraction acteurs : OpenAlex expose les institutions structurees dans
+        # authorships[].institutions[].display_name. Ces noms sont normalises par
+        # OpenAlex (ex: "Massachusetts Institute of Technology" pour MIT). On les
+        # ajoute au dictionnaire des acteurs decouverts pour suggestion future.
+        for authorship in work.get("authorships", []):
+            for inst in (authorship.get("institutions") or []):
+                inst_name = (inst.get("display_name") or "").strip()
+                if inst_name:
+                    _record_actor(inst_name, "openalex")
+
         articles.append({
             "title":        title,
             "link":         link,
@@ -556,11 +688,12 @@ def build_crossref_queries() -> list[str]:
         "hard coating",
         "DLC coating",
     ]
-    # Broadcast keywords + solos + research_orgs (Crossref accepte texte brut)
-    kw_q   = list(KEYWORDS or [])
-    solo_q = list(SOLO_KEYWORDS or [])
-    org_q  = list(RESEARCH_ORGS or [])
-    return list(dict.fromkeys(base + kw_q + solo_q + org_q))
+    # Broadcast keywords + solos + research_orgs + cross_topics (Crossref texte brut)
+    kw_q    = list(KEYWORDS or [])
+    solo_q  = list(SOLO_KEYWORDS or [])
+    org_q   = list(RESEARCH_ORGS or [])
+    cross_q = list(CROSS_DOMAIN_TOPICS or [])
+    return list(dict.fromkeys(base + kw_q + solo_q + org_q + cross_q))
 
 
 def fetch_crossref_works(query: str, max_results: int = 20) -> list[dict[str, Any]]:
@@ -653,13 +786,14 @@ def build_hal_queries() -> list[str]:
         '"thin film coating" OR "couche mince"',
         '"hard coating" OR "revêtement dur"',
     ]
-    # Broadcast keywords + solos + research_orgs (chacun en phrase exacte).
+    # Broadcast keywords + solos + research_orgs + cross_topics (phrase exacte).
     # HAL est l'archive CNRS donc particulierement pertinent pour les
     # research_orgs francaises (CEA-Leti, ONERA, Institut Neel, CIRIMAT...).
-    kw_q   = [f'"{kw}"' for kw in (KEYWORDS or [])]
-    solo_q = [f'"{kw}"' for kw in (SOLO_KEYWORDS or [])]
-    org_q  = [f'"{org}"' for org in (RESEARCH_ORGS or [])]
-    return list(dict.fromkeys(base + kw_q + solo_q + org_q))
+    kw_q    = [f'"{kw}"' for kw in (KEYWORDS or [])]
+    solo_q  = [f'"{kw}"' for kw in (SOLO_KEYWORDS or [])]
+    org_q   = [f'"{org}"' for org in (RESEARCH_ORGS or [])]
+    cross_q = [f'"{topic}"' for topic in (CROSS_DOMAIN_TOPICS or [])]
+    return list(dict.fromkeys(base + kw_q + solo_q + org_q + cross_q))
 
 
 def fetch_hal_publications(query: str, max_results: int = 20) -> list[dict[str, Any]]:
@@ -739,11 +873,12 @@ def build_semantic_scholar_queries() -> list[str]:
         "thin film coating",
         "hard coating",
     ]
-    # Broadcast keywords + solos + research_orgs (Semantic Scholar texte brut)
-    kw_q   = list(KEYWORDS or [])
-    solo_q = list(SOLO_KEYWORDS or [])
-    org_q  = list(RESEARCH_ORGS or [])
-    return list(dict.fromkeys(base + kw_q + solo_q + org_q))
+    # Broadcast keywords + solos + research_orgs + cross_topics (S2 texte brut)
+    kw_q    = list(KEYWORDS or [])
+    solo_q  = list(SOLO_KEYWORDS or [])
+    org_q   = list(RESEARCH_ORGS or [])
+    cross_q = list(CROSS_DOMAIN_TOPICS or [])
+    return list(dict.fromkeys(base + kw_q + solo_q + org_q + cross_q))
 
 
 def fetch_semantic_scholar(query: str, max_results: int = 20) -> list[dict[str, Any]]:
@@ -855,15 +990,15 @@ def build_arxiv_search_queries() -> list[str]:
         'ti:"thin film coating" OR abs:"thin film coating"',
         'ti:"hard coating" OR abs:"hard coating"',
     ]
-    # Broadcast : chaque keyword (couple), chaque solo et chaque research_org
-    # cherches dans titre OU resume. Format arXiv : ti:"X" OR abs:"X".
-    # Pour les research_orgs, on utilise aussi le champ 'all' (tout le doc)
-    # car les noms de labos apparaissent dans les affiliations d'auteurs,
-    # pas forcement dans titre/abstract.
-    kw_q   = [f'ti:"{kw}" OR abs:"{kw}"' for kw in (KEYWORDS or [])]
-    solo_q = [f'ti:"{kw}" OR abs:"{kw}"' for kw in (SOLO_KEYWORDS or [])]
-    org_q  = [f'all:"{org}"' for org in (RESEARCH_ORGS or [])]
-    return list(dict.fromkeys(base + kw_q + solo_q + org_q))
+    # Broadcast : chaque keyword, solo, research_org et cross_topic dans
+    # titre OU resume. Format arXiv : ti:"X" OR abs:"X".
+    # Research_orgs : champ 'all' car les noms apparaissent dans les
+    # affiliations d'auteurs, pas forcement dans titre/abstract.
+    kw_q    = [f'ti:"{kw}" OR abs:"{kw}"' for kw in (KEYWORDS or [])]
+    solo_q  = [f'ti:"{kw}" OR abs:"{kw}"' for kw in (SOLO_KEYWORDS or [])]
+    org_q   = [f'all:"{org}"' for org in (RESEARCH_ORGS or [])]
+    cross_q = [f'ti:"{topic}" OR abs:"{topic}"' for topic in (CROSS_DOMAIN_TOPICS or [])]
+    return list(dict.fromkeys(base + kw_q + solo_q + org_q + cross_q))
 
 
 def fetch_arxiv_search(query: str, max_results: int = 20) -> list[dict[str, Any]] | None:
@@ -948,13 +1083,15 @@ def build_web_queries() -> list[str]:
         '("thin film" OR "coating" OR "DLC" OR "hard coating") materials science innovation',
         '("surface treatment" OR "tribology" OR "wear resistance") industrial coating research',
     ]
-    # Broadcast : chaque keyword, solo et research_org en phrase exacte
-    # avec biais academique ("research academic" oriente Tavily vers les
-    # sources universitaires plutot que les blogs/wikis).
-    kw_q   = [f'"{kw}" research academic' for kw in (KEYWORDS or [])]
-    solo_q = [f'"{kw}" research academic' for kw in (SOLO_KEYWORDS or [])]
-    org_q  = [f'"{org}" PVD CVD ALD coating publication' for org in (RESEARCH_ORGS or [])]
-    return list(dict.fromkeys(base + kw_q + solo_q + org_q))
+    # Broadcast : chaque keyword, solo, research_org et cross_topic en phrase
+    # exacte avec biais academique ("research academic" oriente Tavily vers les
+    # sources universitaires plutot que les blogs/wikis). Pour les cross_topics,
+    # on ajoute "thin film coating" pour orienter vers la combinaison PVD/ALD.
+    kw_q    = [f'"{kw}" research academic' for kw in (KEYWORDS or [])]
+    solo_q  = [f'"{kw}" research academic' for kw in (SOLO_KEYWORDS or [])]
+    org_q   = [f'"{org}" PVD CVD ALD coating publication' for org in (RESEARCH_ORGS or [])]
+    cross_q = [f'"{topic}" thin film deposition innovation' for topic in (CROSS_DOMAIN_TOPICS or [])]
+    return list(dict.fromkeys(base + kw_q + solo_q + org_q + cross_q))
 
 
 def fetch_broad_web_search(query: str, max_results: int = 10) -> list[dict[str, Any]]:
@@ -1061,13 +1198,16 @@ def build_patents_queries() -> list[str]:
         '"hard coating"',
         '"diamond-like carbon"',  # central en brevets DLC
     ]
-    # Broadcast keywords + solos + research_orgs (les labos sont parfois
-    # cessionnaires de brevets, surtout les organismes publics : CEA, CNRS,
-    # Fraunhofer, MIT, NREL deposent des centaines de brevets/an).
-    kw_q   = [f'"{kw}"' for kw in (KEYWORDS or [])]
-    solo_q = [f'"{kw}"' for kw in (SOLO_KEYWORDS or [])]
-    org_q  = [f'assignee:"{org}"' for org in (RESEARCH_ORGS or [])]
-    return list(dict.fromkeys(base + kw_q + solo_q + org_q))
+    # Broadcast keywords + solos + research_orgs + cross_topics. Les labos
+    # sont cherches via assignee: (cessionnaires de brevets, surtout publics :
+    # CEA, CNRS, Fraunhofer, MIT, NREL deposent des centaines de brevets/an).
+    # Les cross_topics ouvrent la decouverte de brevets dans des domaines
+    # transferables a PVD/ALD (photonique, MEMS, nanotech).
+    kw_q    = [f'"{kw}"' for kw in (KEYWORDS or [])]
+    solo_q  = [f'"{kw}"' for kw in (SOLO_KEYWORDS or [])]
+    org_q   = [f'assignee:"{org}"' for org in (RESEARCH_ORGS or [])]
+    cross_q = [f'"{topic}"' for topic in (CROSS_DOMAIN_TOPICS or [])]
+    return list(dict.fromkeys(base + kw_q + solo_q + org_q + cross_q))
 
 
 def fetch_google_patents(query: str, max_results: int = 15) -> list[dict[str, Any]]:
@@ -1131,6 +1271,10 @@ def fetch_google_patents(query: str, max_results: int = 15) -> list[dict[str, An
             summary  = snippet
             if assignee:
                 summary = f"{snippet} [Déposant : {assignee}]" if snippet else f"Déposant : {assignee}"
+                # Extraction acteurs : les deposants de brevets sont souvent des
+                # entreprises dans le domaine. Si non deja dans companies, on
+                # propose la decouverte a l'utilisateur via discovered_actors.json.
+                _record_actor(assignee, "patents")
             articles.append({
                 "title":        title,
                 "link":         f"https://patents.google.com/patent/{pub_num}/en",
@@ -1551,6 +1695,11 @@ def run_scraper(
         logger.info("📊 Répartition par source :")
         for family, count in sorted(source_counts.items(), key=lambda kv: kv[1], reverse=True):
             logger.info(f"   • {family}: {count}")
+
+    # Persistance des acteurs decouverts ce run (entreprises/labos non listes
+    # dans companies/research_orgs mais aperçus dans les resultats Patents/OpenAlex).
+    # L'utilisateur pourra les valider/rejeter via le menu d'edition au prochain run.
+    _save_discovered_actors()
 
     logger.info(f"✅ Collecte terminée : {len(raw_articles)} nouveaux articles.")
     return {
