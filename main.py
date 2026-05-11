@@ -13,6 +13,11 @@ from typing import Any
 # Ajouter le répertoire 'src' au PYTHONPATH pour les imports relatifs
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
+# Chargement du .env AVANT les imports src.*, sinon les modules ai_filter/mailer
+# capturent os.environ.get(...) au niveau module et obtiennent None.
+from dotenv import load_dotenv
+load_dotenv()
+
 # Import des fonctions principales des modules
 from src.scraper import run_scraper
 from src.ai_filter import filter_articles_with_ai, GeminiUnavailableError

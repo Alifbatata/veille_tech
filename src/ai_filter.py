@@ -896,7 +896,7 @@ def _force_company_scores(
 
     for entry in retained_entries:
         article_idx = entry.get("id", -1)
-        if not (0 <= article_idx < len(all_articles)):
+        if not isinstance(article_idx, int) or not (0 <= article_idx < len(all_articles)):
             continue
 
         original = all_articles[article_idx]
@@ -1171,10 +1171,10 @@ def filter_articles_with_ai(
         # Fusion : on rattache les données originales de l'article
         for entry in retained_raw:
             article_idx = entry.get("id", -1)
-            # Vérification que l'index est dans le batch courant
-            if not (offset <= article_idx < offset + len(batch)):
+            # Vérification que l'index est un int dans le batch courant
+            if not isinstance(article_idx, int) or not (offset <= article_idx < offset + len(batch)):
                 logger.warning(
-                    "Index %d hors-plage pour batch offset=%d, ignoré.",
+                    "Index %r hors-plage ou type invalide pour batch offset=%d, ignoré.",
                     article_idx, offset,
                 )
                 continue
