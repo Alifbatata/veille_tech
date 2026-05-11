@@ -22,6 +22,8 @@ Le pipeline collecte des articles depuis **9 sources** scientifiques et de press
 
 - **🌐 Recherche cross-domaine** : 36 thèmes pré-remplis (photonique, MEMS, biomim, nanotech, métamatériaux, IA, décoratif) broadcastés sur les 7 sources scientifiques
 - **🔍 Découverte automatique d'acteurs** : extraction continue des entreprises (Patents) et labos (OpenAlex) non listés. Section dédiée dans l'email + revue interactive CLI
+- **♿ Auto-promotion vers `targets.json`** : un acteur récurrent (count cumulé ≥ 30) est promu automatiquement à la fin du run, classifié `companies` ou `research_orgs` selon heuristique (cap 10/run, configurable via `AUTO_PROMOTE_MIN_COUNT` / `AUTO_PROMOTE_MAX_PER_RUN`)
+- **⏯ Reprise sans re-scraper** : `resume_pipeline.py` reprend depuis `scraper_output.json` si le filtrage IA ou l'envoi email a échoué — économise 14-22h
 - **🎯 Scoring « innovation transférable »** : l'IA évalue le potentiel d'INTÉGRATION cross-domaine avec PVD/ALD, pas juste la présence de mots-clés
 - **🌐 Proxy résidentiel optionnel** : pool 1-3 proxies + health check + failover + auto-recovery (provider recommandé : Decodo)
 - **🔒 Anti-détection 18 couches** : TLS Chrome impersonation, locales rotatives, délais humains, pause circadienne, pre-flight arXiv, circuit breakers
@@ -60,7 +62,10 @@ python configurer.py
 
 ```bash
 python main.py                                       # Pipeline complet (~14-22h selon les cibles)
-python send_recap.py "alice@x.com,bob@y.com"         # Renvoyer l'archive sans re-scraper
+python resume_pipeline.py "alice@x.com,bob@y.com"    # Reprendre après scraping (IA + envoi) sans re-scraper
+python resume_pipeline.py "alice@x.com" --dry-run    # Preview HTML local (filtrage IA + génération sans envoi)
+python resume_pipeline.py "alice@x.com" --no-ai      # Envoi sans relancer Gemini (réutilise ai_filter_output.json)
+python send_recap.py "alice@x.com,bob@y.com"         # Renvoyer l'archive cumulative sans re-scraper
 python send_recap.py "user@x.com" --dry-run          # Générer un preview HTML local
 python -m src.proxy_manager                          # Tester les proxies résidentiels
 python check.py                                      # Lister les modèles Gemini accessibles

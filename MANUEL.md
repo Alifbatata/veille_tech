@@ -310,6 +310,35 @@ python send_recap.py "test@test.com" --dry-run
 | Run hebdomadaire normal | `python main.py` |
 | Onboarding d'un nouveau destinataire | `python send_recap.py "...,..."` |
 | Tester le rendu sans spammer | `python send_recap.py "x@x.com" --dry-run` |
+| Le scraping a marché mais IA / email a planté | `python resume_pipeline.py "...,..."` (voir ci-dessous) |
+
+### Reprise sans re-scraper (`resume_pipeline.py`)
+
+**Cas d'usage** : tu lances `python main.py`, le scraping termine après plusieurs heures (4000+ articles dans `data/scraper_output.json`), MAIS le filtrage IA crashe ou l'envoi email échoue (quota Gemini, mauvaise config SMTP, etc.). Tu ne veux pas relancer 14-22h de scraping.
+
+```powershell
+# Mode interactif (prompt pour les destinataires)
+python resume_pipeline.py
+
+# Avec destinataires CLI
+python resume_pipeline.py "alice@x.com,bob@y.com"
+
+# Preview HTML sans envoi
+python resume_pipeline.py "alice@x.com" --dry-run
+
+# Envoi sans relancer Gemini (réutilise data/ai_filter_output.json déjà filtré)
+python resume_pipeline.py "alice@x.com" --no-ai
+
+# Skip confirmation interactive avant envoi
+python resume_pipeline.py "alice@x.com" --yes
+```
+
+Étapes effectuées :
+1. Lit `data/scraper_output.json`
+2. Filtre les articles < 30 jours
+3. Lance le filtrage IA Gemini (sauf si `--no-ai`)
+4. Met à jour l'archive cumulative
+5. Demande confirmation puis envoie l'email
 
 ---
 
@@ -365,15 +394,20 @@ L'ordinateur doit être allumé à l'heure choisie. Sinon, le Planificateur peut
 
 Pour éditer : lance `python main.py`, accepte de modifier les cibles → tu accèdes à un **menu de 14 actions** organisées par couleur. La numérotation correspond aux paires +/- (ajout/suppression) par liste.
 
-### 🆕 Action 11 — Revoir les acteurs DÉCOUVERTS automatiquement
+### 🆕 Auto-promotion des acteurs découverts
 
-Pendant les runs, le programme extrait les noms d'entreprises/labos vus dans les résultats Patents et OpenAlex (mais qui ne sont **pas dans tes listes**). Action 11 du menu d'édition affiche un tableau classé par occurrence cumulée. Pour chaque candidat tu tapes :
+Pendant les runs, le programme extrait les noms d'entreprises/labos vus dans les résultats Patents et OpenAlex (mais qui ne sont **pas dans tes listes**). Ces candidats sont accumulés dans `data/discovered_actors.json` avec un compteur cumulatif.
+
+**À la fin de chaque run**, un acteur qui dépasse le **seuil de 30 occurrences cumulées** est automatiquement promu vers `targets.json` :
+- Heuristique nom + source détermine si c'est une `company` (suffixes GmbH/Inc/Ltd/...) ou un `research_org` (mots-clés University/Institut/CNRS/Fraunhofer/...).
+- **Cap de 10 promotions par run** pour éviter une explosion du nombre de requêtes futures.
+- Ces seuils sont configurables via `.env` : `AUTO_PROMOTE_MIN_COUNT=30`, `AUTO_PROMOTE_MAX_PER_RUN=10`.
+
+Ta veille **s'enrichit toute seule** au fil des semaines, sans intervention manuelle. Tu peux toujours utiliser **Action 11** du menu d'édition pour revoir / rejeter / ajouter manuellement les candidats sous le seuil :
 - `aN` → ajouter le candidat #N à `companies`
 - `lN` → ajouter le candidat #N à `research_orgs`
 - `rN` → rejeter (retirer des candidats)
 - `q` → quitter la revue
-
-C'est ainsi que ta veille **s'enrichit toute seule** au fil des semaines.
 
 ---
 
@@ -386,6 +420,16 @@ C'est normal si rien de neuf n'a été publié cette semaine sur tes sujets. L'e
 ### Erreur « GEMINI_API_KEY manquante »
 
 Vérifier que le fichier `.env` existe à la racine et contient bien la ligne `GEMINI_API_KEY=...`.
+
+### Le scraping a marché mais l'IA ou l'email a planté (ne pas tout relancer !)
+
+Tes articles bruts sont sauvegardés dans `data/scraper_output.json`. Pour reprendre le pipeline sans relancer 14-22h de scraping :
+
+```powershell
+python resume_pipeline.py "alice@boite.com,bob@boite.com"
+```
+
+Voir section 6 pour les options (`--dry-run` preview, `--no-ai` réutilise filtrage existant, `--yes` skip confirmation).
 
 ### Erreur d'authentification SMTP
 

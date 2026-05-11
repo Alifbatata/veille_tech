@@ -230,7 +230,11 @@ Pendant qu'il collecte, le programme **extrait aussi automatiquement les noms de
 - Champ `assignee` des brevets Google Patents (les déposants)
 - Affiliations institutionnelles des auteurs OpenAlex
 
-Ces acteurs **non encore dans tes listes** sont agrégés dans `data/discovered_actors.json` avec un compteur d'occurrences cumulatif. Plus un acteur revient sur plusieurs runs, plus c'est un signal fort. Tu peux les valider/rejeter via l'**action 11 du menu** d'édition CLI.
+Ces acteurs **non encore dans tes listes** sont agrégés dans `data/discovered_actors.json` avec un compteur d'occurrences cumulatif.
+
+**À la fin de chaque run, le programme promeut automatiquement vers `targets.json` les acteurs qui dépassent 30 occurrences cumulées** (10 maximum par run, classifiés `companies` ou `research_orgs` selon une heuristique nom + source). Ta veille **s'enrichit toute seule** au fil des semaines, sans intervention.
+
+Tu peux toujours valider/rejeter manuellement les candidats sous le seuil via l'**action 11 du menu** d'édition CLI. Pour ajuster les seuils par défaut, ajoute dans `.env` : `AUTO_PROMOTE_MIN_COUNT=30` et `AUTO_PROMOTE_MAX_PER_RUN=10`.
 
 ---
 
@@ -275,6 +279,8 @@ Tu reçois l'email avec :
 ## 🆘 En cas de problème
 
 **Le programme plante / s'arrête en erreur** → Tu reçois un email automatique « ❌ Erreur critique Veille Tech » avec le détail. Lance-moi le message d'erreur, je débogue.
+
+**Le scraping a réussi mais le filtrage IA ou l'email a planté** → Pas de panique, tes 4000+ articles sont sauvegardés dans `data/scraper_output.json`. Lance `python resume_pipeline.py "ton.email@x.com,collegue@y.com"` pour reprendre la phase IA + envoi sans relancer 14-22h de scraping. Ajoute `--dry-run` pour preview HTML, `--no-ai` pour réutiliser le filtrage déjà fait.
 
 **Le digest n'arrive pas dans ta boîte** → Vérifie le dossier **Spam**. Gmail peut considérer le mail SMTP comme suspect au début. Marque comme « non-spam » la première fois.
 

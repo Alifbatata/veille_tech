@@ -17,6 +17,9 @@
 | Commande | Rôle |
 |---|---|
 | `python main.py` | Pipeline complet : RSS + Google News + filtrage IA + email |
+| `python resume_pipeline.py "alice@x.com,bob@y.com"` | Reprend depuis `scraper_output.json` (filtrage IA + archive + email) — usage si IA ou email plante après un scraping réussi |
+| `python resume_pipeline.py "x@x.com" --dry-run` | Génère `data/recap_preview.html` après filtrage IA (consomme Gemini) |
+| `python resume_pipeline.py "x@x.com" --no-ai --yes` | Envoi sans relancer Gemini (réutilise `ai_filter_output.json` existant) |
 | `python send_recap.py "alice@x.com,bob@y.com"` | Rattrapage depuis `data/articles_archive.json` (sans re-scraper, sans coût Gemini) |
 | `python send_recap.py "x@x.com" --dry-run` | Génère `data/recap_preview.html` pour inspecter le rendu |
 | `python src/scraper.py` | Test scraper isolé |

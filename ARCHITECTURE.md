@@ -267,9 +267,18 @@ Implémentée comme JSON FIFO de 10 000 URLs max. 3 modes utilisateur :
 - **Tout renvoyer** : tous les articles passent, badge violet `📌 Déjà envoyé` sur ceux déjà vus auparavant
 - **Reset** : vide `seen_urls.json` puis filtre normal
 
-### Découverte d'acteurs cumulative
+### Découverte d'acteurs cumulative + auto-promotion
 
-`data/discovered_actors.json` agrège inter-runs les noms d'entités vues dans les résultats. Compteur d'occurrences = signal de fréquence. Action 11 du menu d'édition CLI permet la revue interactive (accept→companies, accept→research_orgs, reject).
+`data/discovered_actors.json` agrège inter-runs les noms d'entités vues dans les résultats. Compteur d'occurrences = signal de fréquence.
+
+**Auto-promotion (`scraper.py:auto_promote_actors`)** : à la fin de `run_scraper()`, les acteurs avec count cumulé `≥ AUTO_PROMOTE_MIN_COUNT` (défaut 30) sont automatiquement ajoutés à `targets.json` via `config.save_targets()`. Classification via `_classify_actor()` :
+- Mots-clés labo (`university`, `institut`, `cnrs`, `fraunhofer`, `synchrotron`, …) → `research_orgs`
+- Suffixes entreprise (`gmbh`, `ag`, `inc`, `ltd`, `corp`, `s.a.`, `b.v.`, …) → `companies`
+- Fallback : source `openalex` seule → `research_orgs`, `patents` seule → `companies`
+
+Cap `AUTO_PROMOTE_MAX_PER_RUN` (défaut 10) pour éviter une explosion du nombre de requêtes futures (chaque acteur ajouté est broadcasté sur 7 sources scientifiques = +7 requêtes/run/acteur).
+
+Action 11 du menu CLI reste disponible pour la revue manuelle des candidats sous le seuil (accept→companies, accept→research_orgs, reject).
 
 ---
 
@@ -310,6 +319,8 @@ Implémentée comme JSON FIFO de 10 000 URLs max. 3 modes utilisateur :
 | **`RESIDENTIAL_PROXY_PRIMARY`** | — | **Optionnelle** Proxy résidentiel principal |
 | **`RESIDENTIAL_PROXY_BACKUP`** | — | **Optionnelle** Proxy backup |
 | **`RESIDENTIAL_PROXY_TERTIARY`** | — | **Optionnelle** 3e proxy (rare) |
+| `AUTO_PROMOTE_MIN_COUNT` | 30 | Seuil count cumulé pour auto-promotion d'un acteur découvert → `targets.json` |
+| `AUTO_PROMOTE_MAX_PER_RUN` | 10 | Cap du nombre d'acteurs promus par run |
 | **`PROXY_COUNTRY`** | `CH` | Code pays geo-targeting |
 
 ---
@@ -369,6 +380,7 @@ Implémentée comme JSON FIFO de 10 000 URLs max. 3 modes utilisateur :
 ```
 veille_tech/
 ├── main.py                          # Orchestrateur principal (run hebdomadaire)
+├── resume_pipeline.py               # Reprise après scraping (IA + archive + email)
 ├── send_recap.py                    # Rattrapage : envoie l'archive complète
 ├── configurer.py                    # Config interactive .env (clés API + proxy)
 ├── requirements.txt                 # Dépendances pip
