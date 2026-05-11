@@ -88,14 +88,19 @@
   "research_orgs": [
     "AIST",
     "CEA-Leti",
+    "Centre National de la Recherche Scientifique",
+    "Chinese Academy of Sciences",
     "CIRIMAT",
     "CNRS",
+    "Deutsches Elektronen-Synchrotron DESY",
     "Empa",
     "EPFL",
     "ETH Zurich",
     "Forschungszentrum Jülich",
+    "Fraunhofer Institute for Ceramic Technologies and Systems",
     "Fraunhofer IST",
     "Fraunhofer IWS",
+    "Hefei National Center for Physical Sciences at Nanoscale",
     "Institut Néel",
     "KAIST",
     "Karlsruhe Institute of Technology",
@@ -103,21 +108,27 @@
     "Linköping University",
     "MIT",
     "NIMS",
+    "Ningbo Institute of Industrial Technology",
     "NREL",
     "Oak Ridge National Laboratory",
     "ONERA",
     "Paul Scherrer Institute",
+    "Punjabi University",
     "Sandia National Laboratories",
     "Stanford University",
     "TU Eindhoven",
-    "Uppsala University"
+    "University of Chinese Academy of Sciences",
+    "Université de Lorraine",
+    "Uppsala University",
+    "Yonsei University"
   ],
   "cross_domain_topics": [
     "anti-counterfeiting nano coating",
     "anti-reflection nanostructures coating",
     "atom probe tomography thin films",
-    "auxetic structures surface treatment",
     "autonomous coating deposition AI",
+    "auxetic structures surface treatment",
+    "color stability accelerated aging deposition",
     "cryo-EM coatings characterization",
     "dichroic optical thin film deposition",
     "digital twin deposition process",
@@ -147,7 +158,6 @@
     "solid-state battery interface coating",
     "structural color biomimetic morpho butterfly",
     "structural color watch dial coating",
-    "thermoelectric thin film deposition",
-    "color stability accelerated aging deposition"
+    "thermoelectric thin film deposition"
   ]
 }

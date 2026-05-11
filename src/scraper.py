@@ -206,6 +206,124 @@ def get_session_discovered_actors() -> list[dict[str, Any]]:
 
 
 # =============================================================================
+# Auto-promotion d'acteurs : un acteur recurrent (count cumule >= seuil) est
+# automatiquement ajoute a targets.json (companies ou research_orgs selon
+# heuristique nom + source). Evite a l'utilisateur la revue manuelle systematique.
+# =============================================================================
+
+_AUTO_PROMOTE_MIN_COUNT = int(os.environ.get("AUTO_PROMOTE_MIN_COUNT", "30"))
+_AUTO_PROMOTE_MAX_PER_RUN = int(os.environ.get("AUTO_PROMOTE_MAX_PER_RUN", "10"))
+
+# Mots-cles indiquant un labo/universite/centre de recherche
+_LAB_KEYWORDS = (
+    "university", "université", "universidad", "universität", "universiteit", "universita",
+    "institute", "institut", "instituto",
+    "academy", "académie", "akademie", "academia",
+    "college",
+    "school of", "école", "escola",
+    "laboratory", "laboratoire", "laboratorio",
+    "national center", "national centre", "centre national", "centro nacional",
+    "research center", "research centre", "centre de recherche",
+    "polytechnic", "politecnico", "polytechnique",
+    "fraunhofer", "helmholtz", "max planck", "leibniz", "cnrs", "inserm", "inria",
+    "synchrotron",
+)
+# Mots-cles indiquant une entreprise
+_COMPANY_SUFFIXES = (
+    " gmbh", " ag", " inc", " inc.", " ltd", " ltd.", " corp", " corp.", " llc",
+    " s.a.", " s.a", " b.v.", " bv", " co.", " k.k.", " pty", " s.r.l.", " s.p.a.",
+    " sa ", " plc", " ab ", " oy",
+)
+
+
+def _classify_actor(name: str, sources: list[str]) -> str:
+    """Retourne 'research_org' ou 'company' selon mots-cles + source.
+
+    Heuristique :
+    1. Mot-cle labo dans le nom → research_org
+    2. Suffixe entreprise (GmbH/Inc/Ltd/...) → company
+    3. Source openalex seule → research_org (par defaut OpenAlex = institutions)
+    4. Source patents seule → company (par defaut Patents = assignees)
+    5. Mixte → company (Patents est plus selectif)
+    """
+    lname = " " + name.lower() + " "
+    if any(kw in lname for kw in _LAB_KEYWORDS):
+        return "research_org"
+    if any(suf in lname for suf in _COMPANY_SUFFIXES):
+        return "company"
+    if "openalex" in sources and "patents" not in sources:
+        return "research_org"
+    return "company"
+
+
+def auto_promote_actors(
+    min_count: int = _AUTO_PROMOTE_MIN_COUNT,
+    max_promote: int = _AUTO_PROMOTE_MAX_PER_RUN,
+) -> dict[str, list[str]]:
+    """Promeut les acteurs recurrents (count cumule >= min_count) vers targets.json.
+
+    Lit discovered_actors.json (historique cumulatif), classifie chaque candidat,
+    deduplique contre targets.json, applique le cap max_promote et persiste.
+
+    Returns:
+        {"companies": [...], "research_orgs": [...]} listant les acteurs ajoutes.
+    """
+    from src.config import (
+        load_targets, save_targets,
+        TARGET_COMPANIES, KEYWORDS, SOLO_KEYWORDS, RESEARCH_ORGS, CROSS_DOMAIN_TOPICS,
+    )
+
+    historical = _load_discovered_actors()
+    if not historical:
+        return {"companies": [], "research_orgs": []}
+
+    companies, keywords, solo_keywords, research_orgs, cross_domain_topics = load_targets()
+    known_norm = set(_normalize_actor_name(c) for c in companies)
+    known_norm.update(_normalize_actor_name(o) for o in research_orgs)
+
+    # Tri par count decroissant pour prioriser les plus mentionnes
+    candidates = sorted(
+        historical.items(),
+        key=lambda kv: kv[1].get("count", 0),
+        reverse=True,
+    )
+
+    promoted = {"companies": [], "research_orgs": []}
+    for norm, entry in candidates:
+        if len(promoted["companies"]) + len(promoted["research_orgs"]) >= max_promote:
+            break
+        if entry.get("count", 0) < min_count:
+            break  # liste triee : tous les suivants ont count < min_count
+        if norm in known_norm:
+            continue
+        name = entry.get("name", "").strip()
+        if not name:
+            continue
+        kind = _classify_actor(name, entry.get("sources", []))
+        if kind == "research_org":
+            research_orgs.append(name)
+            promoted["research_orgs"].append(name)
+        else:
+            companies.append(name)
+            promoted["companies"].append(name)
+        known_norm.add(norm)
+
+    if promoted["companies"] or promoted["research_orgs"]:
+        save_targets(companies, keywords, solo_keywords, research_orgs, cross_domain_topics)
+        if promoted["companies"]:
+            logger.info(
+                "🏢 Auto-promotion : %d entreprise(s) ajoutée(s) à targets.json → %s",
+                len(promoted["companies"]), ", ".join(promoted["companies"]),
+            )
+        if promoted["research_orgs"]:
+            logger.info(
+                "🔬 Auto-promotion : %d labo(s) ajouté(s) à targets.json → %s",
+                len(promoted["research_orgs"]), ", ".join(promoted["research_orgs"]),
+            )
+    return promoted
+
+
+# =============================================================================
 # Stats requetes : compte le nombre de resultats par (requete, source) pour
 # permettre a l'utilisateur de voir quelles requetes sont productives et
 # lesquelles sont steriles. Persistance cumulative dans data/query_stats.json.
@@ -1923,6 +2041,13 @@ def run_scraper(
     # Persistance des acteurs decouverts ce run (entreprises/labos non listes
     # dans companies/research_orgs mais aperçus dans les resultats Patents/OpenAlex).
     _save_discovered_actors()
+
+    # Auto-promotion des acteurs recurrents : count cumule >= seuil → targets.json.
+    # Les futurs runs interrogeront ces acteurs comme des cibles connues.
+    try:
+        auto_promote_actors()
+    except Exception as e:
+        logger.warning(f"⚠️ Auto-promotion acteurs : echec non-bloquant : {e}")
 
     # Persistance des stats de requetes (cumul inter-runs) + resume Rich
     _save_query_stats()

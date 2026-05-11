@@ -119,6 +119,35 @@ def load_targets(path: str | None = None) -> tuple[list[str], list[str], list[st
         _cached_targets = ([], [], [], [], [])
         return _cached_targets
 
+def save_targets(
+    companies: list[str],
+    keywords: list[str],
+    solo_keywords: list[str],
+    research_orgs: list[str],
+    cross_domain_topics: list[str],
+    path: str | None = None,
+) -> None:
+    """Persiste les 5 listes dans data/targets.json (chacune dedupliquee + triee alpha).
+
+    Invalide le cache _cached_targets pour que les prochains load_targets()
+    relisent les nouvelles valeurs.
+    """
+    global _cached_targets
+    if path is None:
+        path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "targets.json"))
+
+    payload = {
+        "companies":           sorted(set(companies), key=str.lower),
+        "keywords":            sorted(set(keywords), key=str.lower),
+        "solo_keywords":       sorted(set(solo_keywords), key=str.lower),
+        "research_orgs":       sorted(set(research_orgs), key=str.lower),
+        "cross_domain_topics": sorted(set(cross_domain_topics), key=str.lower),
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    _cached_targets = None  # force reload au prochain load_targets()
+
+
 # --- Initialisation des variables globales ---------------------------------- #
 
 TARGET_COMPANIES: list[str]
