@@ -75,6 +75,16 @@ SCRAPE_PARALLEL_SCIENTIFIC: bool = os.environ.get(
 ).lower() in ("true", "1", "yes")
 SCRAPE_PARALLEL_MAX_WORKERS: int = int(os.environ.get("SCRAPE_PARALLEL_MAX_WORKERS", "5"))
 
+# Persistance des cookies entre runs : un browser reel accumule des cookies
+# sur les sites qu'il visite regulierement (Set-Cookie). Sans persistance, on
+# apparait toujours en "premiere visite" sur les memes domaines chaque semaine,
+# ce qui est statistiquement suspect. Avec persistance, on resemble a un
+# utilisateur recurrent. Format Mozilla (compatible Firefox, Chrome via export).
+_COOKIES_JAR_PATH = os.path.join(os.path.dirname(__file__), "../data/cookies.jar")
+# Cap : on ne garde que les N cookies les plus recents pour eviter de saturer
+# le fichier de state et de propager des cookies devenus stale.
+_COOKIES_MAX_PERSIST = 200
+
 # =============================================================================
 # Decouverte d'acteurs : agrege les noms d'entreprises (assignees brevets) et
 # de labos (institutions OpenAlex/Crossref/HAL/SS) trouves pendant le scraping.
@@ -558,6 +568,72 @@ def _client_hints_for(user_agent: str) -> dict[str, str]:
     return {}
 
 
+def _load_persistent_cookies(session: curl_requests.Session) -> int:
+    """Charge les cookies persistes depuis data/cookies.jar dans la session.
+
+    Format Mozilla (http.cookiejar.MozillaCookieJar) — texte ASCII portable
+    qui survit aux migrations OS/Python. Si le fichier n'existe pas ou est
+    corrompu, on log et on continue avec un jar vierge (degradation gracieuse).
+
+    Returns:
+        Nombre de cookies charges.
+    """
+    if not os.path.exists(_COOKIES_JAR_PATH):
+        return 0
+    try:
+        import http.cookiejar as cjar
+        loader = cjar.MozillaCookieJar(_COOKIES_JAR_PATH)
+        loader.load(ignore_discard=True, ignore_expires=False)
+        count = 0
+        for cookie in loader:
+            # Filtre les cookies expires (loader.load les a deja exclus avec
+            # ignore_expires=False, mais on double-check pour les edge cases)
+            if cookie.expires and cookie.expires < time.time():
+                continue
+            try:
+                session.cookies.jar.set_cookie(cookie)
+                count += 1
+            except (ValueError, AttributeError):
+                pass
+        if count > 0:
+            logger.info(f"🍪 {count} cookies persistents charges depuis runs precedents.")
+        return count
+    except (OSError, cjar.LoadError, ValueError) as e:
+        logger.debug(f"Cookies persistents : chargement impossible ({e}). Jar vierge.")
+        return 0
+
+
+def _save_persistent_cookies(session: curl_requests.Session | None) -> None:
+    """Sauvegarde les cookies de la session dans data/cookies.jar (format Mozilla).
+
+    Limitee aux _COOKIES_MAX_PERSIST cookies les plus recents pour eviter de
+    saturer le fichier. Skip silencieusement si pas de session ou pas de jar.
+    """
+    if session is None or not hasattr(session, "cookies"):
+        return
+    try:
+        import http.cookiejar as cjar
+        all_cookies = list(session.cookies.jar)
+        # Trie par date d'expiration descendante (cookies frais d'abord)
+        all_cookies.sort(
+            key=lambda c: c.expires if c.expires else float("inf"),
+            reverse=True,
+        )
+        keep = all_cookies[:_COOKIES_MAX_PERSIST]
+        if not keep:
+            return
+        os.makedirs(os.path.dirname(_COOKIES_JAR_PATH), exist_ok=True)
+        # MozillaCookieJar requiert un fichier existant pour .save() ; on cree
+        # le fichier en mode write puis on remplit le jar avec nos cookies.
+        jar = cjar.MozillaCookieJar(_COOKIES_JAR_PATH)
+        for cookie in keep:
+            jar.set_cookie(cookie)
+        jar.save(ignore_discard=True, ignore_expires=False)
+        logger.info(f"🍪 {len(keep)} cookies sauvegardes pour les futurs runs.")
+    except (OSError, AttributeError, ValueError) as e:
+        logger.debug(f"Cookies persistents : sauvegarde impossible ({e}).")
+
+
 def _create_new_session() -> curl_requests.Session:
     """Cree une nouvelle session curl_cffi avec impersonate TLS + proxy + tracking.
 
@@ -568,6 +644,10 @@ def _create_new_session() -> curl_requests.Session:
     logger.debug(f"🛡️ Session creee avec impersonate={impersonate}")
     session = curl_requests.Session(impersonate=impersonate)
     session.cookies.set("CONSENT", "YES+cb.20230501-14-p0.fr+FX+414", domain=".google.com")
+    # Charge les cookies des runs precedents pour ressembler a un utilisateur
+    # recurrent (et non a une "premiere visite" systematique). Idempotent et
+    # tolere l'absence de fichier (premiere execution).
+    _load_persistent_cookies(session)
     # Application du proxy actif (si configure). Le ProxyManager est initialise
     # au premier appel et fait son health check. Si aucun proxy sain : mode direct.
     try:
@@ -2373,6 +2453,10 @@ def run_scraper(
     # Persistance des stats de requetes (cumul inter-runs) + resume Rich
     _save_query_stats()
     _print_query_stats_summary()
+
+    # Persistance des cookies inter-runs (anti-detection : un utilisateur reel
+    # accumule des cookies sur les sites qu'il revisite chaque semaine).
+    _save_persistent_cookies(_persistent_session)
 
     logger.info(f"✅ Collecte terminée : {len(raw_articles)} nouveaux articles.")
     return {

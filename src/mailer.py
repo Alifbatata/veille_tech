@@ -483,9 +483,18 @@ def build_html_email(filtered_data: dict[str, Any]) -> str:
     week_num     = _week_number()
     total        = meta.get("retained_count", len(articles))
     input_count  = meta.get("input_count", "—")
+    prefilter_rejected = meta.get("prefilter_rejected", 0)
     model_name   = meta.get("model", "Gemini")
     run_at       = meta.get("run_at", "")[:10]
     tldr_summary = meta.get("tldr", "")
+    # Suffixe stats : mention discrete du pre-filtre pour montrer l'efficacite
+    # du pipeline (X articles ecartes en Python avant Gemini = economie tokens).
+    prefilter_suffix = ""
+    if prefilter_rejected and prefilter_rejected > 0:
+        prefilter_suffix = (
+            f'&nbsp;·&nbsp;<span style="color:#4a6070;">{prefilter_rejected}</span>'
+            "&nbsp;pre-filtre(s)"
+        )
 
     # ── 1. Executive Summary 💡 ──────────────────────────────────────────────
     tldr_html = ""
@@ -752,7 +761,7 @@ def build_html_email(filtered_data: dict[str, Any]) -> str:
                     <span class="stats-count" style="color:#4a8fa8;font-weight:700;">{total}</span>
                     &nbsp;innovation(s) retenue(s)&nbsp;·&nbsp;
                     <span class="stats-count" style="color:#4a8fa8;font-weight:700;">{input_count}</span>
-                    &nbsp;source(s) analysée(s)
+                    &nbsp;article(s) analysé(s){prefilter_suffix}
                     {('&nbsp;·&nbsp;' + score_dist_html) if score_dist_html else ''}
                   </td>
                   <td style="text-align:right;font-size:10px;color:#4a6070;white-space:nowrap;">

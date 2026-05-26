@@ -37,6 +37,7 @@ data/_backup_*/
 data/proxy_bandwidth.json
 data/discovered_actors.json
 data/query_stats.json
+data/cookies.jar
 
 # =============================================================================
 # Exports PDF (regenerables depuis les .md - pas a commiter)

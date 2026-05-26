@@ -161,6 +161,15 @@ Tu verras défiler des logs comme ceci :
 
 ## 4. Que se passe-t-il étape par étape ?
 
+> 🆕 **Nouveau** : depuis la dernière mise à jour majeure, le pipeline est nettement plus rapide et plus furtif :
+> - **Parallélisation** des 4 sources scientifiques OpenAlex / Crossref / HAL / Semantic Scholar → -60 min sur un run complet
+> - **Pré-filtre Python** des articles hors-sujet AVANT Gemini → -15-30% d'appels IA (économise tokens)
+> - **Cookies persistents** entre runs → ressemble à un utilisateur récurrent (browser-like)
+> - **Atomic writes** sur tous les JSON → un Ctrl+C ou un crash ne corrompt plus de fichiers d'état
+> - **Soft-ban detection** : les CAPTCHA / pages "rate limited" déguisées en HTTP 200 sont maintenant détectées et déclenchent un cooldown long
+> - **Headers cohérents** : Accept-Encoding, Sec-Fetch-* adapté au contexte (API JSON vs RSS), Referer plausible, params API shufflés (anti fingerprinting applicatif)
+
+
 ```
    ┌─────────────────────────────────────────────────────────────┐
    │  Tu tapes : python main.py                                   │
@@ -457,7 +466,21 @@ Si tu vois « 🛑 arXiv pre-flight : HTTP 429/403 » : ton IP est temporairemen
 python -m src.proxy_manager
 ```
 
-Affiche le pool, fait un health check via httpbin.org, montre l'IP actuelle. Si ✅ tu peux lancer le pipeline. Si ❌, vérifie tes credentials dans `.env`.
+Affiche le pool, fait un health check (via api.ipify.org puis fallback httpbin/icanhazip), montre l'IP actuelle, le cumul de bande passante consommée et le cap configuré. Si ✅ tu peux lancer le pipeline. Si ❌, vérifie tes credentials dans `.env`.
+
+**Reset du compteur bande passante** (utile en début de nouveau quota mensuel) :
+
+```powershell
+python -m src.proxy_manager --reset
+```
+
+### Plafond de bande passante (trial Decodo 100 MB)
+
+Variable `.env` : `PROXY_BANDWIDTH_CAP_MB=80`. Si le cumul cross-run dépasse, le proxy bascule **automatiquement** en mode direct pour le reste du run. Le compteur est persisté dans `data/proxy_bandwidth.json`. Affichage en fin de run dans le log.
+
+### Le pipeline est-il en mode parallèle ?
+
+Variable `.env` : `SCRAPE_PARALLEL_SCIENTIFIC=true` (défaut). Lance OpenAlex / Crossref / HAL / Semantic Scholar **en parallèle** via 4 threads. Gain typique : -60 min sur un run complet. Pour debug d'une source en particulier, mettre `false`.
 
 ---
 

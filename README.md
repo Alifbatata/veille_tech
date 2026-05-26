@@ -26,7 +26,11 @@ Le pipeline collecte des articles depuis **9 sources** scientifiques et de press
 - **⏯ Reprise sans re-scraper** : `resume_pipeline.py` reprend depuis `scraper_output.json` si le filtrage IA ou l'envoi email a échoué — économise 14-22h
 - **🎯 Scoring « innovation transférable »** : l'IA évalue le potentiel d'INTÉGRATION cross-domaine avec PVD/ALD, pas juste la présence de mots-clés
 - **🌐 Proxy résidentiel optionnel** : pool 1-3 proxies + health check + failover + auto-recovery (provider recommandé : Decodo)
-- **🔒 Anti-détection 18 couches** : TLS Chrome impersonation, locales rotatives, délais humains, pause circadienne, pre-flight arXiv, circuit breakers
+- **🔒 Anti-détection 20+ couches** : TLS Chrome impersonation, locales rotatives, délais humains, pause circadienne, pre-flight arXiv, circuit breakers, **soft-ban detection (CAPTCHA/Cloudflare)**, **headers contextuels** (Sec-Fetch adaptatif API vs RSS), **params shufflés**, **cookies persistents inter-runs**, Accept-Encoding gzip+deflate+br
+- **⚡ Parallélisation inter-sources** : OpenAlex + Crossref + HAL + Semantic Scholar en 4 threads simultanés (gain -60 min/run)
+- **🔬 Pré-filtre Python** : articles hors-sujet écartés AVANT Gemini → économise 15-30% des tokens IA
+- **💾 Atomic writes JSON** : tous les fichiers d'état écrits via tempfile+rename → résistant aux crashs/Ctrl+C
+- **📊 Tracker bande passante proxy** : compteur cumulatif persisté + circuit-breaker `PROXY_BANDWIDTH_CAP_MB` pour protéger un quota trial
 - **♻️ Cascade IA ~38 modèles** : Gemini 2.5/3.x/2.0/1.5 + Gemma 3/4 découverts dynamiquement
 - **🧠 Mémoire articles** : 3 modes (Filtrer / Tout renvoyer + badge / Reset), évite les doublons inter-runs
 - **🔒 Vérification quotas pré-run** : panneau coloré avec statut OK/tendu/RISQUE par source
