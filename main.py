@@ -24,6 +24,7 @@ from src.ai_filter import filter_articles_with_ai, GeminiUnavailableError
 from src.mailer import send_digest, MailerConfigError, MailerSendError
 from src.config import SCRAPE_LIMIT_MONTH
 from src.archive import update_archive
+from src.io_utils import atomic_write_json
 
 # ---------------------------------------------------------------------------
 # Configuration du logging — console + fichier rotatif
@@ -1017,8 +1018,7 @@ def _remove_actor_from_disk(name: str) -> None:
         to_delete = [k for k, v in actors.items() if v.get("name", "").lower() == norm]
         for k in to_delete:
             del actors[k]
-        with open(_DISCOVERED_ACTORS_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        atomic_write_json(_DISCOVERED_ACTORS_PATH, data)
     except (OSError, json.JSONDecodeError):
         pass
 
@@ -1417,8 +1417,7 @@ def _edit_targets_menu(console, Table, Panel, Prompt, IntPrompt, Confirm) -> Non
             targets["solo_keywords"].sort(key=str.lower)
             targets["research_orgs"].sort(key=str.lower)
             targets["cross_domain_topics"].sort(key=str.lower)
-            with open(targets_path, "w", encoding="utf-8") as f:
-                json.dump(targets, f, ensure_ascii=False, indent=2)
+            atomic_write_json(targets_path, targets)
             console.print(Panel(
                 f"[green]✅ Cibles sauvegardees dans {targets_path}[/green]\n"
                 f"   {len(targets['companies'])} entreprise(s), "
@@ -1674,8 +1673,7 @@ def main() -> None:
         # et le pipeline continue. Aucune raison de désactiver l'option ici.
         # include_patents=True (par défaut dans run_scraper) : Google Patents activé.
         scraper_result: dict[str, Any] = run_scraper(include_web=True)
-        with open(SCRAPER_OUTPUT_PATH, "w", encoding="utf-8") as f:
-            json.dump(scraper_result, f, ensure_ascii=False, indent=2)
+        atomic_write_json(SCRAPER_OUTPUT_PATH, scraper_result)
         logger.info(
             "✅ Scraping terminé. %d articles bruts sauvegardés dans '%s'.",
             scraper_result.get("meta", {}).get("total_raw", 0),
@@ -1721,8 +1719,7 @@ def main() -> None:
             logger.info("🤖 Lancement du filtrage IA pour %d articles...", len(articles_to_filter))
             try:
                 ai_filtered_result = filter_articles_with_ai(articles_to_filter, min_score=2)
-                with open(AI_FILTER_OUTPUT_PATH, "w", encoding="utf-8") as f:
-                    json.dump(ai_filtered_result, f, ensure_ascii=False, indent=2)
+                atomic_write_json(AI_FILTER_OUTPUT_PATH, ai_filtered_result)
                 logger.info(
                     "✅ Filtrage IA terminé. %d articles retenus sauvegardés dans '%s'.",
                     ai_filtered_result.get("meta", {}).get("retained_count", 0),

@@ -143,8 +143,8 @@ def save_targets(
         "research_orgs":       sorted(set(research_orgs), key=str.lower),
         "cross_domain_topics": sorted(set(cross_domain_topics), key=str.lower),
     }
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    from src.io_utils import atomic_write_json
+    atomic_write_json(path, payload)
     _cached_targets = None  # force reload au prochain load_targets()
 
 

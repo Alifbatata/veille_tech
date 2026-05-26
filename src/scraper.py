@@ -21,8 +21,10 @@ from curl_cffi.requests import RequestsError
 # Chargement de la config locale
 try:
     from config import KEYWORDS, MAX_ARTICLES_PER_SOURCE, SOURCES_RSS, TARGET_COMPANIES, USE_MEMORY, SCRAPE_LIMIT_MONTH, RECENT_DAYS_LIMIT, SOLO_KEYWORDS, RESEARCH_ORGS, CROSS_DOMAIN_TOPICS
+    from io_utils import atomic_write_json
 except ImportError:
     from src.config import KEYWORDS, MAX_ARTICLES_PER_SOURCE, SOURCES_RSS, TARGET_COMPANIES, USE_MEMORY, SCRAPE_LIMIT_MONTH, RECENT_DAYS_LIMIT, SOLO_KEYWORDS, RESEARCH_ORGS, CROSS_DOMAIN_TOPICS
+    from src.io_utils import atomic_write_json
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s — %(message)s")
 logger = logging.getLogger("scraper")
@@ -183,12 +185,10 @@ def _save_discovered_actors() -> None:
                 if src not in hist_entry.get("sources", []):
                     hist_entry.setdefault("sources", []).append(src)
     try:
-        os.makedirs(os.path.dirname(_DISCOVERED_ACTORS_PATH), exist_ok=True)
-        with open(_DISCOVERED_ACTORS_PATH, "w", encoding="utf-8") as f:
-            json.dump(
-                {"actors": historical, "last_updated": datetime.now(timezone.utc).isoformat()},
-                f, ensure_ascii=False, indent=2,
-            )
+        atomic_write_json(
+            _DISCOVERED_ACTORS_PATH,
+            {"actors": historical, "last_updated": datetime.now(timezone.utc).isoformat()},
+        )
         logger.info(
             f"🔍 Decouverte d'acteurs : {len(_discovered_actors_session)} nouveaux acteurs "
             f"ce run, {len(historical)} cumules historiquement."
@@ -410,12 +410,10 @@ def _save_query_stats() -> None:
                 hist["last_hit_run"]      = today_iso
 
     try:
-        os.makedirs(os.path.dirname(_QUERY_STATS_PATH), exist_ok=True)
-        with open(_QUERY_STATS_PATH, "w", encoding="utf-8") as f:
-            json.dump(
-                {"queries": historical, "last_updated": today_iso},
-                f, ensure_ascii=False, indent=2,
-            )
+        atomic_write_json(
+            _QUERY_STATS_PATH,
+            {"queries": historical, "last_updated": today_iso},
+        )
         logger.info(
             f"📊 Stats requetes : {len(_query_stats_session)} requetes ce run, "
             f"{len(historical)} cumulees historiquement."
@@ -579,6 +577,10 @@ def _get_session() -> curl_requests.Session:
     headers_update: dict[str, str] = {
         "User-Agent":      new_ua,
         "Accept-Language": random.choice(_ACCEPT_LANGUAGES),
+        # Accept-Encoding : tous les browsers modernes annoncent gzip+deflate+br.
+        # L'absence de ce header est un drapeau bot evident. curl_cffi decompresse
+        # automatiquement la reponse, donc cote python rien ne change.
+        "Accept-Encoding": "gzip, deflate, br",
         # Sec-Fetch-* sont envoyes par tous les navigateurs modernes — leur absence
         # est un drapeau bot. Les valeurs varient selon le contexte (top-level, embed,
         # etc.) ; pour des requetes GET de pages on utilise le triplet "navigation".
@@ -592,6 +594,112 @@ def _get_session() -> curl_requests.Session:
     headers_update.update(_client_hints_for(new_ua))
     _persistent_session.headers.update(headers_update)
     return _persistent_session
+
+
+# =============================================================================
+# Helpers anti-detection avances (Tier 2)
+# =============================================================================
+_API_REFERERS = (
+    "https://www.google.com/",
+    "https://duckduckgo.com/",
+    "https://scholar.google.com/",
+    "https://www.bing.com/",
+)
+_RSS_REFERERS = (
+    "https://www.google.com/",
+    "https://feedly.com/",
+    "https://newsblur.com/",
+    "https://www.inoreader.com/",
+)
+# Marqueurs textuels de soft-ban / page d'erreur deguisee. Un HTTP 200 qui
+# contient ces marqueurs n'est PAS un succes : on est en train de se faire
+# rate-limit silencieusement ou de recevoir une CAPTCHA challenge page.
+_SOFT_BAN_MARKERS = (
+    "captcha",
+    "are you a human",
+    "verify you are not a bot",
+    "rate limit exceeded",
+    "too many requests",
+    "unusual traffic from your computer",
+    "automated queries",
+    "access denied",
+    "blocked by",
+    "cloudflare ray id",  # page d'attente Cloudflare
+)
+
+
+def _api_headers(*, accept_json: bool = True, referer: str | None = None) -> dict[str, str]:
+    """Genere des headers coherents pour un appel API JSON.
+
+    WHY : un GET d'API JSON depuis un browser envoie typiquement :
+    - Accept: application/json (pas text/html)
+    - Sec-Fetch-Dest: empty, Sec-Fetch-Mode: cors (fetch() XHR, pas navigation)
+    - Sec-Fetch-Site: cross-site (call vers domaine different)
+    - Referer present (la page d'ou la requete est issue)
+
+    Sans ces variations, toutes nos requetes ressemblent a un client qui fait
+    de la navigation directe (Sec-Fetch-Mode: navigate) — incoherent pour une
+    URL d'API JSON et facilement detectable par un WAF avance.
+    """
+    headers: dict[str, str] = {
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "cross-site",
+        "Referer":        referer or random.choice(_API_REFERERS),
+    }
+    if accept_json:
+        headers["Accept"] = "application/json, text/plain, */*"
+    return headers
+
+
+def _rss_headers(*, referer: str | None = None) -> dict[str, str]:
+    """Headers pour un fetch RSS/Atom. Le Referer plausible pour un lecteur RSS
+    est soit Google (decouverte de feeds), soit un agregateur (Feedly, etc.).
+    """
+    return {
+        "Accept": "application/rss+xml, application/atom+xml, application/xml;q=0.9, */*;q=0.8",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "cross-site",
+        "Referer":        referer or random.choice(_RSS_REFERERS),
+    }
+
+
+def _shuffle_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Renvoie un nouveau dict avec un ordre de cles randomise.
+
+    WHY : un dict Python preserve l'ordre d'insertion, donc nos params API
+    sortent toujours dans le meme ordre (ex: q -> filter -> per-page -> mailto).
+    Un browser ou une bibliotheque JS varie cet ordre selon la version et les
+    extensions. Randomiser l'ordre = -1 signature applicative.
+    """
+    items = list(params.items())
+    random.shuffle(items)
+    return dict(items)
+
+
+def _detect_soft_ban(response_text: str, url: str = "") -> bool:
+    """Detecte si une reponse HTTP 200 est en realite un soft-ban (CAPTCHA,
+    challenge Cloudflare, page "rate limited", etc.).
+
+    Returns True si on detecte des marqueurs. Le caller doit alors :
+    - logger un warning avec l'URL
+    - appliquer un cooldown long sur le domaine
+    - eventuellement rotate la session ou le proxy
+
+    WHY : un HTTP 200 ne signifie PAS un succes. Sans cette detection, on
+    continue a marteler le site en pensant que tout va bien, alors qu'on est
+    deja bloque silencieusement.
+    """
+    if not response_text:
+        return False
+    # On limite l'analyse aux 4000 premiers caracteres pour eviter de scanner
+    # un article legitime (cas borderline : un article qui PARLE de CAPTCHA).
+    lowered = response_text[:4000].lower()
+    for marker in _SOFT_BAN_MARKERS:
+        if marker in lowered:
+            return True
+    return False
 
 
 def _handle_proxy_failure(error_kind: str = "unknown") -> bool:
@@ -759,9 +867,7 @@ def load_seen_urls() -> list[str]:
 def save_seen_urls(seen_list: list[str]) -> None:
     try:
         urls_to_save = seen_list[-_SEEN_URLS_MAX:]
-        os.makedirs(os.path.dirname(_SEEN_URLS_PATH), exist_ok=True)
-        with open(_SEEN_URLS_PATH, "w", encoding="utf-8") as f:
-            json.dump(urls_to_save, f, ensure_ascii=False, indent=2)
+        atomic_write_json(_SEEN_URLS_PATH, urls_to_save)
     except OSError as e:
         logger.error(f"Erreur de sauvegarde history : {e}")
 
@@ -769,13 +875,11 @@ def save_seen_urls(seen_list: list[str]) -> None:
 def _save_checkpoint(articles: list[dict[str, Any]], progress: str) -> None:
     """Sauvegarde un état partiel du scraping pour ne rien perdre en cas d'interruption."""
     try:
-        os.makedirs(os.path.dirname(_CHECKPOINT_PATH), exist_ok=True)
-        with open(_CHECKPOINT_PATH, "w", encoding="utf-8") as f:
-            json.dump({
-                "progress": progress,
-                "saved_at": datetime.now(timezone.utc).isoformat(),
-                "articles": articles,
-            }, f, ensure_ascii=False, indent=2)
+        atomic_write_json(_CHECKPOINT_PATH, {
+            "progress": progress,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "articles": articles,
+        })
     except OSError as e:
         logger.warning(f"⚠️ Échec checkpoint: {e}")
 
@@ -808,7 +912,7 @@ def fetch_rss_feed(source: dict[str, str]) -> list[dict[str, Any]]:
 
     session = _get_session()
     try:
-        response = session.get(url, timeout=fetch_timeout)
+        response = session.get(url, headers=_rss_headers(), timeout=fetch_timeout)
         if response.status_code in (403, 429):
             _record_block(url, base_seconds=120.0 if response.status_code == 429 else 60.0)
             logger.warning(f"🚫 {name} : statut HTTP {response.status_code} (anti-bot ?)")
@@ -819,6 +923,12 @@ def fetch_rss_feed(source: dict[str, str]) -> list[dict[str, Any]]:
         if "text/html" in response.headers.get("Content-Type", ""):
             _record_block(url, base_seconds=60.0)
             logger.warning(f"⚠️ {name} a renvoyé du HTML (blocage anti-bot) au lieu de XML.")
+            return []
+        # Soft-ban detection : meme un HTTP 200 + content-type XML peut etre une
+        # page d'attente Cloudflare ou un challenge CAPTCHA mascarade en XML.
+        if _detect_soft_ban(response.text, url):
+            _record_block(url, base_seconds=300.0)
+            logger.warning(f"🚫 {name} : soft-ban detecte (CAPTCHA/challenge dans la reponse).")
             return []
 
         feed = feedparser.parse(response.content)
@@ -906,7 +1016,12 @@ def fetch_openalex_works(query: str, max_results: int = 25) -> list[dict[str, An
     _respect_domain_cooldown("https://api.openalex.org/works")
     session = _get_session()
     try:
-        response = session.get("https://api.openalex.org/works", params=params, timeout=20)
+        response = session.get(
+            "https://api.openalex.org/works",
+            params=_shuffle_params(params),
+            headers=_api_headers(),
+            timeout=20,
+        )
         if response.status_code in (403, 429):
             _record_block("https://api.openalex.org/works", base_seconds=60.0)
             logger.warning(f"🚫 OpenAlex : statut HTTP {response.status_code}")
@@ -1014,9 +1129,10 @@ def fetch_crossref_works(query: str, max_results: int = 20) -> list[dict[str, An
     from datetime import timedelta
     cutoff_date = (datetime.now(timezone.utc) - timedelta(days=RECENT_DAYS_LIMIT)).strftime("%Y-%m-%d")
     polite_email = os.environ.get("GMAIL_USER", "veille-tech@example.com")
-    headers = {
-        "User-Agent": f"VeilleTech/1.0 (mailto:{polite_email})",
-    }
+    # Crossref recommande explicitement un UA identifiant le client + mailto.
+    # On override le UA de la session pour cet appel uniquement.
+    headers = _api_headers()
+    headers["User-Agent"] = f"VeilleTech/1.0 (mailto:{polite_email})"
     params = {
         "query":  query,
         "rows":   max_results,
@@ -1031,7 +1147,12 @@ def fetch_crossref_works(query: str, max_results: int = 20) -> list[dict[str, An
     _respect_domain_cooldown("https://api.crossref.org/works")
     session = _get_session()
     try:
-        response = session.get("https://api.crossref.org/works", params=params, headers=headers, timeout=20)
+        response = session.get(
+            "https://api.crossref.org/works",
+            params=_shuffle_params(params),
+            headers=headers,
+            timeout=20,
+        )
         if response.status_code in (403, 429):
             _record_block("https://api.crossref.org/works", base_seconds=60.0)
             logger.warning(f"🚫 Crossref : statut HTTP {response.status_code}")
@@ -1122,7 +1243,12 @@ def fetch_hal_publications(query: str, max_results: int = 20) -> list[dict[str, 
     _respect_domain_cooldown("https://api.archives-ouvertes.fr/search/")
     session = _get_session()
     try:
-        response = session.get("https://api.archives-ouvertes.fr/search/", params=params, timeout=20)
+        response = session.get(
+            "https://api.archives-ouvertes.fr/search/",
+            params=_shuffle_params(params),
+            headers=_api_headers(),
+            timeout=20,
+        )
         if response.status_code in (403, 429):
             _record_block("https://api.archives-ouvertes.fr/search/", base_seconds=60.0)
             logger.warning(f"🚫 HAL : statut HTTP {response.status_code}")
@@ -1217,7 +1343,7 @@ def fetch_semantic_scholar(query: str, max_results: int = 20) -> list[dict[str, 
         "year":   year_filter,
         "fields": "title,abstract,url,publicationDate,venue,externalIds",
     }
-    headers: dict[str, str] = {}
+    headers = _api_headers(referer="https://www.semanticscholar.org/")
     api_key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY")
     if api_key:
         headers["x-api-key"] = api_key
@@ -1226,7 +1352,7 @@ def fetch_semantic_scholar(query: str, max_results: int = 20) -> list[dict[str, 
     _respect_domain_cooldown(url)
     session = _get_session()
     try:
-        response = session.get(url, params=params, headers=headers, timeout=20)
+        response = session.get(url, params=_shuffle_params(params), headers=headers, timeout=20)
         if response.status_code == 429:
             _record_block(url, base_seconds=120.0)
             logger.warning(f"⏳ Semantic Scholar : rate limit (429), requête ignorée")
@@ -1339,10 +1465,9 @@ def fetch_arxiv_search(query: str, max_results: int = 20) -> list[dict[str, Any]
     # User-Agent identifiable conformement a la politique arXiv (RFC 7231).
     # arXiv demande explicitement de fournir un UA distinct des navigateurs
     # standards pour les acces API automatises (mailto facultatif mais aide).
-    arxiv_headers = {
-        "User-Agent": "VeilleTechno-Pipeline/1.0 (research; +https://github.com/)",
-        "Accept": "application/atom+xml",
-    }
+    arxiv_headers = _api_headers(referer="https://arxiv.org/")
+    arxiv_headers["User-Agent"] = "VeilleTechno-Pipeline/1.0 (research; +https://github.com/)"
+    arxiv_headers["Accept"] = "application/atom+xml"
 
     _respect_domain_cooldown(url)
     session = _get_session()
@@ -1443,6 +1568,7 @@ def fetch_broad_web_search(query: str, max_results: int = 10) -> list[dict[str, 
         response = session.post(
             "https://api.tavily.com/search",
             json=payload,
+            headers=_api_headers(referer="https://app.tavily.com/"),
             timeout=20,
         )
     except (RequestsError, OSError) as exc:
@@ -1546,15 +1672,21 @@ def fetch_google_patents(query: str, max_results: int = 15) -> list[dict[str, An
 
     # Querystring INTERNE (à URL-encoder dans le paramètre 'url=')
     inner = f"q={query}&num={max_results}&after=priority:{cutoff_date}&language=ENGLISH"
-    url = f"https://patents.google.com/xhr/query?url={quote_plus(inner)}&exp="
+    # WHY exp= aleatoire : `&exp=` vide est une signature script (paramètre vide
+    # systematique). Google utilise exp pour ses A/B tests internes — un browser
+    # reel envoie souvent une valeur (vide, "0", id de variant). On alterne.
+    exp_value = random.choice(["", "", "0", "stable", "v1"])
+    url = f"https://patents.google.com/xhr/query?url={quote_plus(inner)}&exp={exp_value}"
 
     _respect_domain_cooldown(url)
     session = _get_session()
+    # Patents repond via XHR fetch (donc Sec-Fetch-Mode: cors). Referer doit pointer
+    # vers une page Patents (l'utilisateur a fait une recherche sur patents.google.com
+    # qui a declenche cet XHR via JS interne).
+    patent_headers = _api_headers(referer="https://patents.google.com/")
+    patent_headers["Sec-Fetch-Site"] = "same-origin"  # XHR vers meme domaine
     try:
-        response = session.get(
-            url, timeout=20,
-            headers={"Accept": "application/json", "Referer": "https://patents.google.com/"},
-        )
+        response = session.get(url, timeout=20, headers=patent_headers)
         # 503/502/504 = service unavailable / bad gateway / gateway timeout.
         # Sur Google Patents, un 503 systematique signe une detection bot
         # (l'IP est blackliste cote Google). Cooldown long + retour None
@@ -1618,8 +1750,8 @@ def fetch_google_news(query: str) -> list[dict[str, Any]] | None:
     _respect_domain_cooldown(url)
     session = _get_session()
     # Referer crédible : un humain arrive sur Google News depuis google.com ou via favori,
-    # rarement via une URL nue avec query string.
-    request_headers = {"Referer": "https://www.google.com/"}
+    # rarement via une URL nue avec query string. Sec-Fetch-* "navigate" cohérent (RSS = doc).
+    request_headers = _rss_headers(referer="https://news.google.com/")
     try:
         response = session.get(url, headers=request_headers, timeout=20)
         if response.status_code in (403, 429):
@@ -1632,6 +1764,11 @@ def fetch_google_news(query: str) -> list[dict[str, Any]] | None:
         if not response.text.lstrip().startswith("<?xml"):
             _record_block(url, base_seconds=120.0)
             logger.warning(f"⚠️ Réponse non-XML de Google News (probable blocage): {response.text[:120]}")
+            return None
+        # Soft-ban detection : XML qui contient des marqueurs de captcha/rate-limit
+        if _detect_soft_ban(response.text, url):
+            _record_block(url, base_seconds=600.0)
+            logger.warning(f"🚫 Google News : soft-ban detecte dans la reponse XML.")
             return None
 
         feed = feedparser.parse(response.content)

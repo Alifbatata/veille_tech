@@ -245,17 +245,17 @@ class ProxyManager:
             self._bandwidth_used_bytes = 0
 
     def _bandwidth_save_to_disk(self) -> None:
-        """Persiste le compteur cumulatif (snapshot atomic via tempfile + rename)."""
+        """Persiste le compteur cumulatif via le helper atomic_write_json."""
         try:
-            os.makedirs(os.path.dirname(_BANDWIDTH_STATE_PATH), exist_ok=True)
-            tmp_path = _BANDWIDTH_STATE_PATH + ".tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump({
-                    "total_bytes": self._bandwidth_used_bytes,
-                    "total_mb": round(self._bandwidth_used_bytes / (1024 * 1024), 3),
-                    "last_updated": time.strftime("%Y-%m-%d %H:%M:%S"),
-                }, f, indent=2)
-            os.replace(tmp_path, _BANDWIDTH_STATE_PATH)
+            try:
+                from .io_utils import atomic_write_json
+            except ImportError:
+                from io_utils import atomic_write_json  # type: ignore
+            atomic_write_json(_BANDWIDTH_STATE_PATH, {
+                "total_bytes": self._bandwidth_used_bytes,
+                "total_mb": round(self._bandwidth_used_bytes / (1024 * 1024), 3),
+                "last_updated": time.strftime("%Y-%m-%d %H:%M:%S"),
+            })
         except OSError as e:
             logger.debug(f"Persistance proxy_bandwidth.json: {e}")
 

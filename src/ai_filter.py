@@ -68,6 +68,116 @@ _STATIC_FALLBACK_CHAIN: list[str] = [
     "gemma-3-12b-it",
 ]
 
+# =============================================================================
+# Pre-filtrage Python : economise des tokens Gemini sur les articles qui n'ont
+# AUCUN mot des targets/keywords/topics (donc 0 chance d'etre retenus). Gain
+# estime 15-30% des articles eliminer sans payer un appel IA.
+# WHY : Gemini est lent (~5s/batch) et compte sur le quota free 20 req/jour.
+# Filtrer une partie en Python amont = plus de batchs utiles, moins de gaspillage.
+# =============================================================================
+# Mots tres courts a ignorer (stop-words techniques qui matchent partout)
+_PREFILTER_MIN_WORD_LEN = 3
+# Stop-words tres restreints : juste les conjonctions et articles courants.
+# On reste conservatif → mieux vaut envoyer un article hors-sujet a l'IA
+# (l'IA tranchera) que rejeter un article pertinent (perte definitive).
+_PREFILTER_STOPWORDS = frozenset({
+    "the", "and", "for", "with", "from", "into", "non", "des", "les",
+    "une", "que", "pas", "sur", "ces", "est", "par", "qui", "ses",
+    "this", "that", "have", "been", "their", "them", "dans", "pour",
+    "avec", "sans", "plus", "comme", "tout", "tous", "etc",
+})
+
+
+def _build_prefilter_terms() -> tuple[set[str], list[str]]:
+    """Construit l'ensemble des termes pertinents pour le prefiltrage.
+
+    Retourne (mots_simples, phrases_multimots) :
+    - mots_simples : set de tokens individuels >= 3 chars pour match par split()
+    - phrases_multimots : liste de phrases entieres ("photonique integree") pour
+      match substring (plus precis que tokenization).
+
+    On tire la liste depuis config.py (load_targets) pour qu'elle suive
+    automatiquement les modifications de l'utilisateur via action 11/14.
+    """
+    try:
+        from src.config import (
+            TARGET_COMPANIES, KEYWORDS, SOLO_KEYWORDS,
+            RESEARCH_ORGS, CROSS_DOMAIN_TOPICS,
+        )
+    except ImportError:
+        from config import (  # type: ignore
+            TARGET_COMPANIES, KEYWORDS, SOLO_KEYWORDS,
+            RESEARCH_ORGS, CROSS_DOMAIN_TOPICS,
+        )
+    all_phrases: list[str] = []
+    all_phrases.extend(TARGET_COMPANIES)
+    all_phrases.extend(KEYWORDS)
+    all_phrases.extend(SOLO_KEYWORDS)
+    all_phrases.extend(RESEARCH_ORGS)
+    all_phrases.extend(CROSS_DOMAIN_TOPICS)
+
+    simple_words: set[str] = set()
+    multi_word_phrases: list[str] = []
+    for phrase in all_phrases:
+        normalized = phrase.lower().strip()
+        if not normalized:
+            continue
+        if " " in normalized or "-" in normalized:
+            # Phrase multi-mots : on l'ajoute comme phrase ET on extrait ses
+            # tokens individuels pour permettre des matchs partiels. Ex :
+            # "Magnetron sputtering" → match aussi sur "sputtering" tout seul.
+            multi_word_phrases.append(normalized)
+            for token in re.findall(r"[a-z0-9]+", normalized):
+                if len(token) >= _PREFILTER_MIN_WORD_LEN and token not in _PREFILTER_STOPWORDS:
+                    simple_words.add(token)
+        else:
+            if len(normalized) >= _PREFILTER_MIN_WORD_LEN and normalized not in _PREFILTER_STOPWORDS:
+                simple_words.add(normalized)
+    return simple_words, multi_word_phrases
+
+
+def _prefilter_articles(
+    articles: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """Filtre les articles qui n'ont AUCUN match avec les termes pertinents.
+
+    Returns:
+        (articles_conserves, nb_rejetes_par_prefilter)
+    """
+    simple_words, multi_phrases = _build_prefilter_terms()
+    if not simple_words and not multi_phrases:
+        return articles, 0  # safety : si targets vides, ne filtre rien
+
+    kept: list[dict[str, Any]] = []
+    rejected = 0
+    for art in articles:
+        # Concatenation titre + summary + source pour la recherche
+        haystack = " ".join([
+            art.get("title", ""),
+            art.get("summary", ""),
+            art.get("source", ""),
+        ]).lower()
+        if not haystack.strip():
+            # Article quasi-vide : on garde par precaution (IA decidera)
+            kept.append(art)
+            continue
+        # Match rapide via substring pour les phrases multi-mots
+        matched = False
+        for phrase in multi_phrases:
+            if phrase in haystack:
+                matched = True
+                break
+        if not matched and simple_words:
+            # Tokenization simple pour les mots seuls
+            tokens = set(re.findall(r"[a-z0-9]+", haystack))
+            if tokens & simple_words:
+                matched = True
+        if matched:
+            kept.append(art)
+        else:
+            rejected += 1
+    return kept, rejected
+
 # Préférence d'ordre quand on découvre dynamiquement les modèles disponibles.
 # Plus le poids est BAS, plus le modèle passe en premier dans la cascade.
 # Les modèles non listés ici reçoivent un poids générique (100) et passent
@@ -562,9 +672,12 @@ def _parse_json_response(raw: str) -> dict[str, Any]:
     if not isinstance(parsed["retained"], list):
         raise ValueError("'retained' doit être une liste.")
 
-    # Validation stricte de la clé "tldr" exigée dans le prompt
+    # Validation gracieuse de la clé "tldr" (cf. docstring : un tldr manquant
+    # n'est pas fatal — on injecte une chaine vide et on warn. Eviter un raise
+    # qui ferait perdre tout le batch alors que `retained` est correct).
     if "tldr" not in parsed:
-        raise ValueError(f"Clé 'tldr' absente du JSON : {parsed}")
+        logger.warning("⚠️  Cle 'tldr' absente du JSON Gemini — injection chaine vide.")
+        parsed["tldr"] = ""
     elif not isinstance(parsed["tldr"], str):
         logger.warning(
             "⚠️  Clé 'tldr' de type inattendu (%s) — conversion forcée en chaîne.",
@@ -1135,6 +1248,24 @@ def filter_articles_with_ai(
         logger.warning("Aucun article à filtrer.")
         return _empty_result(0, min_score)
 
+    input_count = len(articles)
+
+    # ── Pre-filtrage Python : economise des tokens Gemini ───────────────────
+    # Rejette les articles qui n'ont AUCUN match avec targets/keywords. Cf.
+    # _prefilter_articles : gain typique 15-30% des articles bruts.
+    articles, prefilter_rejected = _prefilter_articles(articles)
+    if prefilter_rejected > 0:
+        pct = 100 * prefilter_rejected / input_count
+        logger.info(
+            "🔎 Pre-filtre Python : %d article(s) rejete(s) avant Gemini "
+            "(%.1f%% du flux) — economie de tokens IA",
+            prefilter_rejected, pct,
+        )
+
+    if not articles:
+        logger.warning("⚠️ Tous les articles ont ete rejetes par le pre-filtre.")
+        return _empty_result(input_count, min_score)
+
     # Initialisation du client (lève GeminiUnavailableError si clé absente)
     model = _init_client()
 
@@ -1217,13 +1348,16 @@ def filter_articles_with_ai(
     # un résumé de tendances cohérent et non redondant.
     executive_summary = _generate_executive_summary(model, all_retained)
 
+    # input_count = volume brut avant pre-filtre (vision utilisateur des articles
+    # arrives au pipeline IA). rejected_count = pre-filtre + rejets IA cumules.
     result = {
         "meta": {
             "run_at":           datetime.now(timezone.utc).isoformat(),
             "model":            _active_model_name,
-            "input_count":      len(articles),
+            "input_count":      input_count,
             "retained_count":   len(all_retained),
-            "rejected_count":   total_rejected,
+            "rejected_count":   total_rejected + prefilter_rejected,
+            "prefilter_rejected": prefilter_rejected,
             "batch_count":      len(batches),
             "min_score_filter": min_score,
             "tldr":             executive_summary,
@@ -1332,8 +1466,8 @@ if __name__ == "__main__":
     # Sauvegarde JSON
     out_path = os.path.join(os.path.dirname(__file__), "../data/ai_filter_output.json")
     try:
-        with open(out_path, "w", encoding="utf-8") as fh:
-            json.dump(filtered, fh, ensure_ascii=False, indent=2)
+        from src.io_utils import atomic_write_json
+        atomic_write_json(out_path, filtered)
         print(f"💾 Résultats sauvegardés → {out_path}")
     except OSError as exc:
         print(f"❌ Erreur lors de la sauvegarde de ai_filter_output.json : {exc}")

@@ -153,8 +153,8 @@ def main() -> int:
             logger.error("❌ Gemini indisponible : %s", e)
             return 1
 
-        with open(AI_FILTER_OUTPUT_PATH, "w", encoding="utf-8") as f:
-            json.dump(ai_filtered_result, f, ensure_ascii=False, indent=2)
+        from src.io_utils import atomic_write_json
+        atomic_write_json(AI_FILTER_OUTPUT_PATH, ai_filtered_result)
         retained = ai_filtered_result.get("meta", {}).get("retained_count", 0)
         logger.info("✅ Filtrage IA termine : %d articles retenus, sauvegarde dans %s.",
                     retained, os.path.basename(AI_FILTER_OUTPUT_PATH))

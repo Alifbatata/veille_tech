@@ -64,15 +64,14 @@ def update_archive(new_articles: list[dict[str, Any]]) -> int:
     merged = merged[:_ARCHIVE_MAX_ENTRIES]
 
     try:
-        os.makedirs(os.path.dirname(_ARCHIVE_PATH), exist_ok=True)
-        with open(_ARCHIVE_PATH, "w", encoding="utf-8") as f:
-            json.dump({
-                "meta": {
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                    "total":      len(merged),
-                },
-                "articles": merged,
-            }, f, ensure_ascii=False, indent=2)
+        from src.io_utils import atomic_write_json
+        atomic_write_json(_ARCHIVE_PATH, {
+            "meta": {
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "total":      len(merged),
+            },
+            "articles": merged,
+        })
         logger.info("📚 Archive mise à jour : %d nouveau(x) / %d total", added, len(merged))
     except OSError as e:
         logger.error("Échec écriture archive : %s", e)
