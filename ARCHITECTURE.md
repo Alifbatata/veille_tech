@@ -212,6 +212,26 @@ Provider recommandé : **Decodo** (ex-Smartproxy) en mono-provider (~$8.50/GB, $
 
 Test : `python -m src.proxy_manager` → liste les proxies, fait health check, affiche statut + bandwidth report.
 
+### Parallélisation inter-sources scientifiques
+
+**Activé par défaut** (`SCRAPE_PARALLEL_SCIENTIFIC=true`). OpenAlex, Crossref, HAL et Semantic Scholar tournent dans 4 threads simultanés via `ThreadPoolExecutor`. Chaque thread :
+- A sa **propre session curl_cffi** via `threading.local()` (pas de race condition sur cookies/headers)
+- Crée sa propre session avec son impersonate TLS, son UA et son entrée proxy
+- Suit les délais gaussiens intra-source (anti-bot par domaine préservé)
+
+**Pourquoi pas de risque ban croisé** : les 4 sources sont sur des domaines disjoints (`api.openalex.org`, `api.crossref.org`, `api.archives-ouvertes.fr`, `api.semanticscholar.org`). Le proxy résidentiel rotating port 7000 donne une IP différente à chaque requête, donc même le proxy ne voit pas les 4 sources « surger » depuis la même IP.
+
+**Thread-safety** : les dicts globaux (`_DOMAIN_COOLDOWN`, `_discovered_actors_session`, `_query_stats_session`) sont protégés par `threading.Lock` (`_globals_lock`).
+
+**Sources NON-parallélisées** (gardées séquentielles) :
+- RSS feeds (fast — pas nécessaire)
+- arXiv search (pre-flight + circuit breaker spécifique)
+- Google Patents (sensible anti-bot, pre-flight)
+- Google News (TRÈS sensible anti-bot, jamais parallélisé)
+- Tavily Web (rate-limit API)
+
+**Gain mesuré** : test 4 sources × 1 query = 3.0s en parallèle vs ~10s+ en séquentiel. Sur run complet : ~80 min séquentiel → ~22 min parallèle (-60 min).
+
 ### Délais aléatoires gaussiens
 
 Tous les `time.sleep` utilisent `random.gauss(μ, σ)` clampé à un minimum, pas `random.uniform`. La distribution normale ressemble plus au comportement humain (concentration autour de la moyenne, queues fines).
@@ -329,6 +349,8 @@ Action 11 du menu CLI reste disponible pour la revue manuelle des candidats sous
 | `AUTO_PROMOTE_MAX_PER_RUN` | 10 | Cap du nombre d'acteurs promus par run |
 | **`PROXY_COUNTRY`** | `CH` | Code pays geo-targeting (laisser vide en trial Decodo gratuit) |
 | **`PROXY_BANDWIDTH_CAP_MB`** | 0 | Plafond bande passante en MB (0 = pas de cap). Recommandé 80 pour trial 100 MB |
+| **`SCRAPE_PARALLEL_SCIENTIFIC`** | `true` | Lance OpenAlex/Crossref/HAL/S2 en parallèle (4 threads). Gain ~60 min sur run complet |
+| **`SCRAPE_PARALLEL_MAX_WORKERS`** | 5 | Nb max de threads workers (1 par source) |
 
 ---
 

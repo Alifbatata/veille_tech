@@ -9,10 +9,12 @@ import logging
 import os
 import random
 import re
+import threading
 import time
 import certifi
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote_plus
 import feedparser
 from curl_cffi import requests as curl_requests
@@ -49,10 +51,29 @@ _ACCEPT_LANGUAGES = [
 ]
 
 _persistent_session: curl_requests.Session | None = None
+# Stockage thread-local des sessions : chaque thread du ThreadPoolExecutor
+# (parallelisation inter-sources scientifiques) doit avoir sa propre session
+# curl_cffi pour eviter des race conditions sur les cookies, headers, et le
+# pool de connexions. Le thread principal utilise toujours `_persistent_session`
+# pour preserver la compatibilite avec le mode sequentiel.
+_thread_local_session = threading.local()
+# Verrou pour proteger les ecritures sur les dicts globaux (cooldown,
+# discovered_actors, query_stats) en mode parallele.
+_globals_lock = threading.Lock()
 _SEEN_URLS_MAX: int = 10000
 _SEEN_URLS_PATH = os.path.join(os.path.dirname(__file__), "../data/seen_urls.json")
 _CHECKPOINT_PATH = os.path.join(os.path.dirname(__file__), "../data/scraper_checkpoint.json")
 _CHECKPOINT_EVERY: int = 5  # Sauvegarde tous les N appels GNews
+# Activation parallelisme inter-sources scientifiques (arXiv/OpenAlex/Crossref/
+# HAL/S2). WHY threading et pas asyncio : conversion async invasive du codebase
+# vs ThreadPoolExecutor qui wrap les fonctions sync existantes. Chaque thread
+# attend ses propres sleep, et les 5 sources sont sur des domaines disjoints
+# (pas de risque ban croise). Gain estime : ~60-70% temps de scraping scientifique.
+# Desactivable via env si l'utilisateur veut le mode sequentiel.
+SCRAPE_PARALLEL_SCIENTIFIC: bool = os.environ.get(
+    "SCRAPE_PARALLEL_SCIENTIFIC", "true"
+).lower() in ("true", "1", "yes")
+SCRAPE_PARALLEL_MAX_WORKERS: int = int(os.environ.get("SCRAPE_PARALLEL_MAX_WORKERS", "5"))
 
 # =============================================================================
 # Decouverte d'acteurs : agrege les noms d'entreprises (assignees brevets) et
@@ -77,9 +98,13 @@ def _domain_of(url: str) -> str:
         return "unknown"
 
 def _respect_domain_cooldown(url: str) -> None:
-    """Si on a pris un 403/429 récemment sur ce domaine, attend que la pénalité expire."""
+    """Si on a pris un 403/429 récemment sur ce domaine, attend que la pénalité expire.
+
+    Thread-safe : la lecture du dict global est protegee par lock.
+    """
     dom = _domain_of(url)
-    expires_at = _DOMAIN_COOLDOWN.get(dom, 0.0)
+    with _globals_lock:
+        expires_at = _DOMAIN_COOLDOWN.get(dom, 0.0)
     delta = expires_at - time.monotonic()
     if delta > 0:
         logger.info(f"⏸️  Cooldown actif pour {dom} : attente {delta:.1f}s")
@@ -87,13 +112,17 @@ def _respect_domain_cooldown(url: str) -> None:
 
 def _record_block(url: str, base_seconds: float = 60.0) -> None:
     """Enregistre un blocage anti-bot (403/429) sur un domaine et fixe un cooldown.
-    Le cooldown est multiplicatif si plusieurs blocages s'enchaînent sur le même domaine."""
+    Le cooldown est multiplicatif si plusieurs blocages s'enchaînent sur le même domaine.
+
+    Thread-safe : la mise a jour du dict global est protegee par lock.
+    """
     dom = _domain_of(url)
     now = time.monotonic()
-    # Si déjà en cooldown, on double la pénalité (backoff exponentiel par domaine)
-    current_remaining = max(0.0, _DOMAIN_COOLDOWN.get(dom, 0.0) - now)
-    new_penalty = max(base_seconds, current_remaining * 2.0)
-    _DOMAIN_COOLDOWN[dom] = now + new_penalty
+    with _globals_lock:
+        # Si déjà en cooldown, on double la pénalité (backoff exponentiel par domaine)
+        current_remaining = max(0.0, _DOMAIN_COOLDOWN.get(dom, 0.0) - now)
+        new_penalty = max(base_seconds, current_remaining * 2.0)
+        _DOMAIN_COOLDOWN[dom] = now + new_penalty
     logger.warning(f"🚧 Blocage détecté sur {dom} — cooldown {new_penalty:.0f}s avant nouvelle requête")
 
 
@@ -134,20 +163,22 @@ def _record_actor(name: str, source: str) -> None:
     if _is_actor_already_known(name_clean):
         return
     norm = _normalize_actor_name(name_clean)
-    entry = _discovered_actors_session.get(norm)
-    if entry is None:
-        _discovered_actors_session[norm] = {
-            "name":       name_clean,  # Garde la casse d'origine pour affichage
-            "count":      1,
-            "sources":    [source],
-            "first_seen": datetime.now(timezone.utc).isoformat(),
-            "last_seen":  datetime.now(timezone.utc).isoformat(),
-        }
-    else:
-        entry["count"] += 1
-        if source not in entry["sources"]:
-            entry["sources"].append(source)
-        entry["last_seen"] = datetime.now(timezone.utc).isoformat()
+    # Thread-safe : protege la lecture+ecriture du dict partage
+    with _globals_lock:
+        entry = _discovered_actors_session.get(norm)
+        if entry is None:
+            _discovered_actors_session[norm] = {
+                "name":       name_clean,  # Garde la casse d'origine pour affichage
+                "count":      1,
+                "sources":    [source],
+                "first_seen": datetime.now(timezone.utc).isoformat(),
+                "last_seen":  datetime.now(timezone.utc).isoformat(),
+            }
+        else:
+            entry["count"] += 1
+            if source not in entry["sources"]:
+                entry["sources"].append(source)
+            entry["last_seen"] = datetime.now(timezone.utc).isoformat()
 
 
 def _load_discovered_actors() -> dict[str, dict[str, Any]]:
@@ -344,12 +375,13 @@ def _record_query_stat(query: str, source: str, count: int) -> None:
     """Enregistre le nombre de resultats d'une requete sur une source.
 
     Cumule en memoire pendant le run, persiste en fin via _save_query_stats().
-    Tolere count=None (traite comme 0).
+    Tolere count=None (traite comme 0). Thread-safe via _globals_lock.
     """
     if not query:
         return
     key = _query_stat_key(query, source)
-    _query_stats_session[key] = int(count) if count is not None else 0
+    with _globals_lock:
+        _query_stats_session[key] = int(count) if count is not None else 0
 
 
 def _load_query_stats() -> dict[str, dict[str, Any]]:
@@ -526,9 +558,50 @@ def _client_hints_for(user_agent: str) -> dict[str, str]:
     return {}
 
 
-def _get_session() -> curl_requests.Session:
-    """Crée une session avec une empreinte TLS Chrome native (Bypass Cloudflare strict).
+def _create_new_session() -> curl_requests.Session:
+    """Cree une nouvelle session curl_cffi avec impersonate TLS + proxy + tracking.
 
+    Factorise pour etre reutilisable depuis `_get_session()` (mode sequentiel,
+    session globale) et depuis le code parallele (session thread-local).
+    """
+    impersonate = random.choice(_IMPERSONATE_ROTATION)
+    logger.debug(f"🛡️ Session creee avec impersonate={impersonate}")
+    session = curl_requests.Session(impersonate=impersonate)
+    session.cookies.set("CONSENT", "YES+cb.20230501-14-p0.fr+FX+414", domain=".google.com")
+    # Application du proxy actif (si configure). Le ProxyManager est initialise
+    # au premier appel et fait son health check. Si aucun proxy sain : mode direct.
+    try:
+        from .proxy_manager import get_proxy_manager
+    except ImportError:
+        from proxy_manager import get_proxy_manager  # type: ignore
+    proxy_dict = get_proxy_manager().current_proxy_dict()
+    if proxy_dict:
+        session.proxies = proxy_dict
+        entry = get_proxy_manager().current_proxy()
+        if entry is not None:
+            logger.info(f"🌐 Session routee via proxy : {entry.name} ({entry.masked_url()})")
+        # Wrap Session.request pour tracker la bande passante consommee via proxy.
+        # WHY override de `request` : `get`, `post`, etc. appellent tous `request`
+        # en interne dans curl_cffi -> un seul point d'instrumentation suffit.
+        _mgr_ref = get_proxy_manager()
+        _orig_request = session.request
+        def _tracked_request(*args, **kwargs):  # type: ignore[no-untyped-def]
+            response = _orig_request(*args, **kwargs)
+            try:
+                body_size = len(response.content) if getattr(response, "content", None) else 0
+                _mgr_ref.add_bytes(body_size)
+            except (AttributeError, OSError):
+                pass
+            return response
+        session.request = _tracked_request  # type: ignore[method-assign]
+    return session
+
+
+def _get_session() -> curl_requests.Session:
+    """Renvoie la session reseau du contexte courant (thread-local si on est
+    dans un thread worker, sinon la session globale persistante).
+
+    Crée une session avec une empreinte TLS Chrome native (Bypass Cloudflare strict).
     À chaque appel après création, l'User-Agent, l'Accept-Language et les Client
     Hints (Sec-Ch-Ua-*) sont rerollés de façon cohérente sur la session existante
     (sans détruire les cookies).
@@ -539,39 +612,23 @@ def _get_session() -> curl_requests.Session:
     la session est routée à travers le proxy actif du pool. En cas d'échec proxy
     en cours de run, le caller peut appeler `_handle_proxy_failure()` qui rotate
     automatiquement vers le proxy suivant.
+
+    Threading : si on est dans un worker thread (= un thread autre que main),
+    chaque thread a sa propre session via threading.local. Sinon (thread principal),
+    on utilise la session globale `_persistent_session`.
     """
     global _persistent_session
-    if _persistent_session is None:
-        impersonate = random.choice(_IMPERSONATE_ROTATION)
-        logger.debug(f"🛡️ Session créée avec impersonate={impersonate}")
-        _persistent_session = curl_requests.Session(impersonate=impersonate)
-        _persistent_session.cookies.set("CONSENT", "YES+cb.20230501-14-p0.fr+FX+414", domain=".google.com")
-        # Application du proxy actif (si configure). Le ProxyManager est initialise
-        # au premier appel et fait son health check. Si aucun proxy sain : mode direct.
-        try:
-            from .proxy_manager import get_proxy_manager
-        except ImportError:
-            from proxy_manager import get_proxy_manager  # type: ignore
-        proxy_dict = get_proxy_manager().current_proxy_dict()
-        if proxy_dict:
-            _persistent_session.proxies = proxy_dict
-            entry = get_proxy_manager().current_proxy()
-            if entry is not None:
-                logger.info(f"🌐 Session routee via proxy : {entry.name} ({entry.masked_url()})")
-            # Wrap Session.request pour tracker la bande passante consommee via proxy.
-            # WHY override de `request` : `get`, `post`, etc. appellent tous `request`
-            # en interne dans curl_cffi -> un seul point d'instrumentation suffit.
-            _mgr_ref = get_proxy_manager()
-            _orig_request = _persistent_session.request
-            def _tracked_request(*args, **kwargs):  # type: ignore[no-untyped-def]
-                response = _orig_request(*args, **kwargs)
-                try:
-                    body_size = len(response.content) if getattr(response, "content", None) else 0
-                    _mgr_ref.add_bytes(body_size)
-                except (AttributeError, OSError):
-                    pass
-                return response
-            _persistent_session.request = _tracked_request  # type: ignore[method-assign]
+    is_worker = threading.current_thread() is not threading.main_thread()
+    if is_worker:
+        session = getattr(_thread_local_session, "session", None)
+        if session is None:
+            session = _create_new_session()
+            _thread_local_session.session = session
+        target_session = session
+    else:
+        if _persistent_session is None:
+            _persistent_session = _create_new_session()
+        target_session = _persistent_session
     # Reroll headers a chaque get_session (UA + Accept-Language + Client Hints coherents avec UA)
     new_ua = random.choice(ROTATING_USER_AGENTS)
     headers_update: dict[str, str] = {
@@ -592,8 +649,8 @@ def _get_session() -> curl_requests.Session:
         "DNT":             "1",
     }
     headers_update.update(_client_hints_for(new_ua))
-    _persistent_session.headers.update(headers_update)
-    return _persistent_session
+    target_session.headers.update(headers_update)
+    return target_session
 
 
 # =============================================================================
@@ -721,8 +778,13 @@ def _handle_proxy_failure(error_kind: str = "unknown") -> bool:
     mgr.mark_failure()
     logger.warning(f"⚠️ Echec proxy detecte ({error_kind}) — tentative de bascule.")
     if mgr.rotate():
-        # Reinit la session pour appliquer le nouveau proxy
-        _persistent_session = None
+        # Reinit la session du contexte courant (main ou worker thread) pour
+        # appliquer le nouveau proxy. Les autres threads picreront la nouvelle
+        # config a leur prochain reset (anti-bot rotation periodique).
+        if threading.current_thread() is threading.main_thread():
+            _persistent_session = None
+        else:
+            _thread_local_session.session = None
         return True
     logger.error("🛑 Plus aucun proxy sain dans le pool.")
     return False
@@ -1879,6 +1941,108 @@ def _dedup_by_title(articles: list[dict[str, Any]]) -> tuple[list[dict[str, Any]
     return deduped, len(articles) - len(deduped)
 
 
+def _scrape_source_block(
+    name:           str,
+    emoji:          str,
+    fetcher:        Callable[[str], list[dict[str, Any]]],
+    queries:        list[str],
+    delay_min:      float,
+    delay_mean:     float,
+    delay_sigma:    float,
+) -> list[dict[str, Any]]:
+    """Execute le scraping d'UNE source scientifique (OA / Crossref / HAL / S2).
+
+    Encapsule le pattern "for query in queries: fetch + sleep". Conçu pour etre
+    appele DANS un thread worker via ThreadPoolExecutor : utilise _get_session()
+    qui delivre une session thread-local quand on est dans un worker.
+
+    Args:
+        name: libelle affiche dans les logs (ex: "OpenAlex").
+        emoji: prefixe visuel des lignes log.
+        fetcher: fonction (query: str) -> list[dict].
+        queries: liste de requetes thematiques a executer.
+        delay_min: borne basse du sleep inter-requete.
+        delay_mean: moyenne gaussienne du sleep.
+        delay_sigma: ecart-type gaussien du sleep.
+
+    Returns:
+        Liste cumulee de tous les articles collectes pour cette source.
+    """
+    collected: list[dict[str, Any]] = []
+    logger.info(f"{emoji} Lancement {name} : {len(queries)} requetes thematiques.")
+    for idx, q in enumerate(queries, 1):
+        logger.info(f"{emoji} {name} [{idx}/{len(queries)}] : « {q[:80]}... »")
+        try:
+            collected.extend(fetcher(q))
+        except Exception as e:
+            # Capture defensive : un thread qui crash ne doit pas tuer les autres.
+            # Les fetchers gerent deja leurs erreurs reseau, ici on attrape le reste
+            # (ex: assert error, regex panic, etc.) pour preserver les resultats.
+            logger.warning(f"{emoji} {name} : erreur inattendue sur « {q[:60]}... » : {e}")
+        if idx < len(queries):
+            time.sleep(max(delay_min, random.gauss(delay_mean, delay_sigma)))
+    return collected
+
+
+def _run_scientific_sources_parallel(
+    enabled: dict[str, bool],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Lance OpenAlex / Crossref / HAL / Semantic Scholar EN PARALLELE via threads.
+
+    Chaque source tourne dans son propre thread avec sa propre session curl_cffi
+    (thread-local). Les delais intra-source sont preserves (anti-bot par domaine),
+    mais les sources s'executent simultanement (domaines disjoints, pas de risque
+    de ban croise). Gain typique : ~60-70% temps sur cette portion du scraping.
+
+    arXiv RESTE sequentiel (pre-flight + circuit breaker complexe a paralleliser).
+
+    Args:
+        enabled: dict {nom: bool} indiquant les sources a lancer.
+
+    Returns:
+        (articles_cumulés, blocs_exécutés)
+    """
+    # Mapping nom -> (emoji, fetcher, builder, delay_min, delay_mean, delay_sigma)
+    sources_config: list[tuple[str, str, Callable, Callable, float, float, float]] = []
+    if enabled.get("openalex"):
+        sources_config.append(("OpenAlex", "📚", fetch_openalex_works, build_openalex_queries, 5.0, 10.0, 3.0))
+    if enabled.get("crossref"):
+        sources_config.append(("Crossref", "📖", fetch_crossref_works, build_crossref_queries, 5.0, 10.0, 3.0))
+    if enabled.get("hal"):
+        sources_config.append(("HAL", "🇫🇷", fetch_hal_publications, build_hal_queries, 5.0, 10.0, 3.0))
+    if enabled.get("s2"):
+        sources_config.append(("SemanticScholar", "🧠", fetch_semantic_scholar, build_semantic_scholar_queries, 8.0, 12.0, 3.0))
+
+    if not sources_config:
+        return [], []
+
+    n_workers = min(SCRAPE_PARALLEL_MAX_WORKERS, len(sources_config))
+    logger.info(
+        f"⚡ Parallelisation : {len(sources_config)} sources scientifiques en {n_workers} threads simultanes."
+    )
+
+    all_collected: list[dict[str, Any]] = []
+    executed: list[str] = []
+    with ThreadPoolExecutor(max_workers=n_workers, thread_name_prefix="sci-scraper") as ex:
+        future_to_name = {
+            ex.submit(
+                _scrape_source_block, name, emoji, fetcher, builder(), dmin, dmean, dsig,
+            ): name
+            for (name, emoji, fetcher, builder, dmin, dmean, dsig) in sources_config
+        }
+        for fut in as_completed(future_to_name):
+            name = future_to_name[fut]
+            try:
+                articles = fut.result()
+                all_collected.extend(articles)
+                executed.append(name)
+                logger.info(f"✅ {name} : {len(articles)} articles collectes (thread termine).")
+            except Exception as e:
+                logger.error(f"❌ {name} : thread crash — {e}")
+                executed.append(f"{name} (erreur)")
+    return all_collected, executed
+
+
 def run_scraper(
     include_rss:               bool = True,
     include_gnews:             bool = True,
@@ -1956,50 +2120,56 @@ def run_scraper(
                     time.sleep(max(12.0, random.gauss(20.0, 5.0)))
             _executed_blocks.append("arXiv")
 
-    if include_openalex:
-        _maybe_inter_source_pause("OpenAlex")
-        oa_queries = build_openalex_queries()
-        logger.info(f"📚 Lancement OpenAlex : {len(oa_queries)} requêtes thématiques.")
-        for idx, q in enumerate(oa_queries, 1):
-            logger.info(f"📚 OpenAlex [{idx}/{len(oa_queries)}] : « {q[:80]}... »")
-            all_articles.extend(fetch_openalex_works(q))
-            if idx < len(oa_queries):
-                time.sleep(max(5.0, random.gauss(10.0, 3.0)))
-        _executed_blocks.append("OpenAlex")
+    # =========================================================================
+    # Bloc OpenAlex + Crossref + HAL + SemanticScholar : parallelisable.
+    # Si SCRAPE_PARALLEL_SCIENTIFIC=true (defaut), on lance les 4 en parallele
+    # via ThreadPoolExecutor (chaque thread = sa propre session, ses propres
+    # sleep). Domaines disjoints → pas de risque ban croise. Gain ~60-70%.
+    # Sinon, mode sequentiel historique (utile si l'utilisateur veut un trace
+    # ordonne ou troubleshooter une source en particulier).
+    # =========================================================================
+    if SCRAPE_PARALLEL_SCIENTIFIC and (include_openalex or include_crossref or include_hal or include_semantic_scholar):
+        _maybe_inter_source_pause("Sources_Parallel")
+        parallel_articles, parallel_blocks = _run_scientific_sources_parallel({
+            "openalex": include_openalex,
+            "crossref": include_crossref,
+            "hal":      include_hal,
+            "s2":       include_semantic_scholar,
+        })
+        all_articles.extend(parallel_articles)
+        _executed_blocks.extend(parallel_blocks)
+    else:
+        if include_openalex:
+            _maybe_inter_source_pause("OpenAlex")
+            all_articles.extend(_scrape_source_block(
+                "OpenAlex", "📚", fetch_openalex_works, build_openalex_queries(),
+                5.0, 10.0, 3.0,
+            ))
+            _executed_blocks.append("OpenAlex")
 
-    if include_crossref:
-        _maybe_inter_source_pause("Crossref")
-        cr_queries = build_crossref_queries()
-        logger.info(f"📖 Lancement Crossref : {len(cr_queries)} requêtes thématiques.")
-        for idx, q in enumerate(cr_queries, 1):
-            logger.info(f"📖 Crossref [{idx}/{len(cr_queries)}] : « {q[:80]}... »")
-            all_articles.extend(fetch_crossref_works(q))
-            if idx < len(cr_queries):
-                time.sleep(max(5.0, random.gauss(10.0, 3.0)))
-        _executed_blocks.append("Crossref")
+        if include_crossref:
+            _maybe_inter_source_pause("Crossref")
+            all_articles.extend(_scrape_source_block(
+                "Crossref", "📖", fetch_crossref_works, build_crossref_queries(),
+                5.0, 10.0, 3.0,
+            ))
+            _executed_blocks.append("Crossref")
 
-    if include_hal:
-        _maybe_inter_source_pause("HAL")
-        hal_queries = build_hal_queries()
-        logger.info(f"🇫🇷 Lancement HAL (CNRS) : {len(hal_queries)} requêtes thématiques.")
-        for idx, q in enumerate(hal_queries, 1):
-            logger.info(f"🇫🇷 HAL [{idx}/{len(hal_queries)}] : « {q[:80]}... »")
-            all_articles.extend(fetch_hal_publications(q))
-            if idx < len(hal_queries):
-                time.sleep(max(5.0, random.gauss(10.0, 3.0)))
-        _executed_blocks.append("HAL")
+        if include_hal:
+            _maybe_inter_source_pause("HAL")
+            all_articles.extend(_scrape_source_block(
+                "HAL", "🇫🇷", fetch_hal_publications, build_hal_queries(),
+                5.0, 10.0, 3.0,
+            ))
+            _executed_blocks.append("HAL")
 
-    if include_semantic_scholar:
-        _maybe_inter_source_pause("SemanticScholar")
-        ss_queries = build_semantic_scholar_queries()
-        logger.info(f"🧠 Lancement Semantic Scholar : {len(ss_queries)} requêtes thématiques.")
-        for idx, q in enumerate(ss_queries, 1):
-            logger.info(f"🧠 Semantic Scholar [{idx}/{len(ss_queries)}] : « {q[:80]}... »")
-            all_articles.extend(fetch_semantic_scholar(q))
-            # Rate-limit public ~1 req/s ; on monte largement au-dessus
-            if idx < len(ss_queries):
-                time.sleep(max(8.0, random.gauss(12.0, 3.0)))
-        _executed_blocks.append("SemanticScholar")
+        if include_semantic_scholar:
+            _maybe_inter_source_pause("SemanticScholar")
+            all_articles.extend(_scrape_source_block(
+                "SemanticScholar", "🧠", fetch_semantic_scholar, build_semantic_scholar_queries(),
+                8.0, 12.0, 3.0,
+            ))
+            _executed_blocks.append("SemanticScholar")
 
     if include_web:
         _maybe_inter_source_pause("Tavily")
