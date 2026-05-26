@@ -21,6 +21,8 @@ en `***:***@host:port` dans les logs).
 """
 from __future__ import annotations
 
+import atexit
+import json
 import logging
 import os
 import re
@@ -30,7 +32,15 @@ from dataclasses import dataclass, field
 logger = logging.getLogger("proxy_manager")
 
 # Constantes
-_HEALTH_CHECK_URL = "https://httpbin.org/ip"
+# Liste de health check URLs : on essaie dans l'ordre jusqu'a une qui repond.
+# WHY plusieurs URLs : httpbin.org est ponctuellement sature (HTTP 503),
+# api.ipify.org est plus stable mais sans User-Agent details, icanhazip.com est
+# minimal. Une seule reponse 200 suffit pour declarer le proxy sain.
+_HEALTH_CHECK_URLS = (
+    "https://api.ipify.org?format=json",
+    "https://httpbin.org/ip",
+    "https://icanhazip.com",
+)
 _HEALTH_CHECK_TIMEOUT = 15.0
 # Seuil d'echecs avant de marquer un proxy "dead". Adapte au nombre de proxies :
 #   - 1 seul proxy   : 5 echecs (plus tolerant, on n'a pas de backup)
@@ -45,6 +55,22 @@ _PROXY_ENV_VARS = (
     "RESIDENTIAL_PROXY_BACKUP",
     "RESIDENTIAL_PROXY_TERTIARY",
 )
+
+# Tracker de bande passante : utile pour les trials a quota (Decodo 100 MB),
+# affiche les MB consommees en fin de run, declenche un cap si configure.
+# WHY persistance JSON : le compteur survit aux runs successifs (un trial 100 MB
+# se consomme sur plusieurs runs), reset manuel via bandwidth_reset() ou suppression
+# du fichier data/proxy_bandwidth.json.
+_BANDWIDTH_STATE_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "data", "proxy_bandwidth.json"
+)
+# Overhead estime par requete : headers HTTP + TLS handshake + ACKs (approx).
+# Decodo facture le trafic NET cote client (in + out), donc on ajoute un fixe
+# par requete pour englober les headers TX/RX que `len(response.content)` ignore.
+_BANDWIDTH_PER_REQ_OVERHEAD_BYTES = 2500
+# Persistance : on flush sur disque tous les N appels add_bytes pour limiter
+# les ecritures (un GNews run = ~600 requetes, 1 ecriture par requete = trop).
+_BANDWIDTH_FLUSH_EVERY = 25
 
 
 @dataclass
@@ -82,6 +108,13 @@ class ProxyManager:
         self._pool: list[_ProxyEntry] = []
         self._current_idx: int = 0
         self._initialized: bool = False
+        # Tracker bande passante (cumulatif sur tous les runs)
+        self._bandwidth_used_bytes: int = 0
+        self._bandwidth_session_bytes: int = 0  # juste pour ce run
+        self._bandwidth_request_count: int = 0
+        self._bandwidth_cap_bytes: int = 0  # 0 = pas de cap
+        self._bandwidth_cap_triggered: bool = False
+        self._bandwidth_flush_counter: int = 0
 
     def _load_from_env(self) -> None:
         """Charge les proxies depuis les variables d'environnement, dans l'ordre.
@@ -105,26 +138,41 @@ class ProxyManager:
 
     @staticmethod
     def _check_proxy_health(url: str) -> tuple[bool, str]:
-        """Test rapide : ping httpbin.org/ip via le proxy.
+        """Test rapide : tente plusieurs URLs de healthcheck via le proxy.
+
+        On essaie chaque URL de _HEALTH_CHECK_URLS dans l'ordre. La premiere
+        qui repond 200 declare le proxy sain. WHY : httpbin.org est ponctuellement
+        sature, ipify et icanhazip servent de filets.
 
         Returns:
-            (ok, message) — ok=True si HTTP 200 reçu, message diagnostic.
+            (ok, message) — ok=True si au moins une URL repond 200.
         """
-        try:
-            from curl_cffi import requests as curl_requests
-            r = curl_requests.get(
-                _HEALTH_CHECK_URL,
-                proxies={"http": url, "https": url},
-                impersonate="chrome124",
-                timeout=_HEALTH_CHECK_TIMEOUT,
-            )
-            if r.status_code != 200:
-                return False, f"HTTP {r.status_code}"
-            data = r.json()
-            ip_seen = data.get("origin", "?")
-            return True, f"IP visible : {ip_seen}"
-        except Exception as exc:
-            return False, f"{type(exc).__name__}: {exc}"
+        from curl_cffi import requests as curl_requests
+        last_err = "unknown"
+        for check_url in _HEALTH_CHECK_URLS:
+            try:
+                r = curl_requests.get(
+                    check_url,
+                    proxies={"http": url, "https": url},
+                    impersonate="chrome124",
+                    timeout=_HEALTH_CHECK_TIMEOUT,
+                )
+                if r.status_code == 200:
+                    # Extrait l'IP de la reponse (format variable selon URL)
+                    ip_seen = "?"
+                    try:
+                        if "json" in (r.headers.get("Content-Type", "")).lower() or check_url.endswith("?format=json"):
+                            data = r.json()
+                            ip_seen = data.get("ip") or data.get("origin") or "?"
+                        else:
+                            ip_seen = r.text.strip()[:30]
+                    except (ValueError, KeyError):
+                        ip_seen = "?"
+                    return True, f"IP visible : {ip_seen}"
+                last_err = f"HTTP {r.status_code} via {check_url}"
+            except Exception as exc:
+                last_err = f"{type(exc).__name__}: {exc}"
+        return False, last_err
 
     def initialize(self) -> None:
         """Charge les proxies depuis .env et fait un health check initial.
@@ -134,11 +182,32 @@ class ProxyManager:
         if self._initialized:
             return
         self._initialized = True
+        # Lecture du cap bande passante (.env : PROXY_BANDWIDTH_CAP_MB)
+        try:
+            cap_mb = float(os.environ.get("PROXY_BANDWIDTH_CAP_MB", "0").strip() or "0")
+            self._bandwidth_cap_bytes = int(cap_mb * 1024 * 1024) if cap_mb > 0 else 0
+        except ValueError:
+            self._bandwidth_cap_bytes = 0
+        # Restaure le compteur cumulatif si fichier existe
+        self._bandwidth_load_from_disk()
         self._load_from_env()
         if not self._pool:
             logger.info("ℹ️ Aucun proxy résidentiel configuré (.env). Mode direct.")
             return
         logger.info(f"🌐 Pool de {len(self._pool)} proxy(s) résidentiel(s) configuré(s).")
+        if self._bandwidth_cap_bytes > 0:
+            cap_mb = self._bandwidth_cap_bytes / (1024 * 1024)
+            used_mb = self._bandwidth_used_bytes / (1024 * 1024)
+            logger.info(
+                f"📊 Bande passante cumulee : {used_mb:.2f} MB / cap {cap_mb:.0f} MB "
+                f"({100*used_mb/cap_mb:.1f}%)"
+            )
+            if self._bandwidth_used_bytes >= self._bandwidth_cap_bytes:
+                self._bandwidth_cap_triggered = True
+                logger.warning(
+                    "⚠️ Cap bande passante DEJA atteint. Le proxy ne sera pas utilise "
+                    "pour ce run (mode direct force). Reset : supprime data/proxy_bandwidth.json"
+                )
         for entry in self._pool:
             ok, msg = self._check_proxy_health(entry.url)
             entry.healthy = ok
@@ -156,8 +225,101 @@ class ProxyManager:
             )
 
     def has_healthy_proxy(self) -> bool:
-        """True si au moins un proxy est marqué comme sain."""
+        """True si au moins un proxy est marqué comme sain ET le cap n'est pas atteint."""
+        if self._bandwidth_cap_triggered:
+            return False
         return any(p.healthy for p in self._pool)
+
+    # =========================================================================
+    # Tracker de bande passante
+    # =========================================================================
+    def _bandwidth_load_from_disk(self) -> None:
+        """Charge le compteur cumulatif depuis data/proxy_bandwidth.json."""
+        try:
+            if os.path.exists(_BANDWIDTH_STATE_PATH):
+                with open(_BANDWIDTH_STATE_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self._bandwidth_used_bytes = int(data.get("total_bytes", 0))
+        except (OSError, ValueError, json.JSONDecodeError) as e:
+            logger.debug(f"Lecture proxy_bandwidth.json: {e} (compteur reset a 0)")
+            self._bandwidth_used_bytes = 0
+
+    def _bandwidth_save_to_disk(self) -> None:
+        """Persiste le compteur cumulatif (snapshot atomic via tempfile + rename)."""
+        try:
+            os.makedirs(os.path.dirname(_BANDWIDTH_STATE_PATH), exist_ok=True)
+            tmp_path = _BANDWIDTH_STATE_PATH + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "total_bytes": self._bandwidth_used_bytes,
+                    "total_mb": round(self._bandwidth_used_bytes / (1024 * 1024), 3),
+                    "last_updated": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }, f, indent=2)
+            os.replace(tmp_path, _BANDWIDTH_STATE_PATH)
+        except OSError as e:
+            logger.debug(f"Persistance proxy_bandwidth.json: {e}")
+
+    def add_bytes(self, content_bytes: int) -> None:
+        """Comptabilise une requete passee via le proxy.
+
+        Args:
+            content_bytes: taille du `response.content` (peut etre 0 si erreur).
+                On ajoute un overhead fixe pour englober headers TX/RX que cette
+                taille ignore. Pas precis au byte pres mais correct ordre de grandeur.
+        """
+        # Pas de track si proxy desactive (mode direct)
+        if not self._pool or self._bandwidth_cap_triggered:
+            return
+        total = max(0, content_bytes) + _BANDWIDTH_PER_REQ_OVERHEAD_BYTES
+        self._bandwidth_used_bytes += total
+        self._bandwidth_session_bytes += total
+        self._bandwidth_request_count += 1
+        self._bandwidth_flush_counter += 1
+        # Persiste tous les N appels pour limiter IO
+        if self._bandwidth_flush_counter >= _BANDWIDTH_FLUSH_EVERY:
+            self._bandwidth_save_to_disk()
+            self._bandwidth_flush_counter = 0
+        # Declenche le cap si depasse
+        if self._bandwidth_cap_bytes > 0 and self._bandwidth_used_bytes >= self._bandwidth_cap_bytes:
+            if not self._bandwidth_cap_triggered:
+                self._bandwidth_cap_triggered = True
+                cap_mb = self._bandwidth_cap_bytes / (1024 * 1024)
+                logger.warning(
+                    f"🛑 Cap bande passante atteint ({cap_mb:.0f} MB). "
+                    f"Bascule en mode DIRECT pour le reste du run."
+                )
+
+    def bandwidth_report(self) -> str:
+        """Resume textuel du tracker pour les logs / fin de run."""
+        if not self._pool:
+            return "Pas de proxy configure (pas de tracking)."
+        used_mb = self._bandwidth_used_bytes / (1024 * 1024)
+        session_mb = self._bandwidth_session_bytes / (1024 * 1024)
+        lines = [
+            f"📊 Bande passante proxy :",
+            f"   • Cette session : {session_mb:.2f} MB ({self._bandwidth_request_count} requetes)",
+            f"   • Cumul total : {used_mb:.2f} MB",
+        ]
+        if self._bandwidth_cap_bytes > 0:
+            cap_mb = self._bandwidth_cap_bytes / (1024 * 1024)
+            pct = 100 * used_mb / cap_mb if cap_mb > 0 else 0
+            lines.append(f"   • Cap : {cap_mb:.0f} MB ({pct:.1f}% atteint)")
+            if self._bandwidth_cap_triggered:
+                lines.append("   • ⚠️ Cap declenchee : proxy desactive pour la suite")
+        return "\n".join(lines)
+
+    def bandwidth_flush(self) -> None:
+        """Force la sauvegarde sur disque du compteur (a appeler en fin de run)."""
+        if self._pool:
+            self._bandwidth_save_to_disk()
+
+    def bandwidth_reset(self) -> None:
+        """Reset complet du compteur (utile en debut de nouveau quota mensuel)."""
+        self._bandwidth_used_bytes = 0
+        self._bandwidth_session_bytes = 0
+        self._bandwidth_request_count = 0
+        self._bandwidth_cap_triggered = False
+        self._bandwidth_save_to_disk()
 
     def _try_recover_proxies(self) -> None:
         """Auto-recovery : retente un health check sur les proxies marques HORS-LIGNE
@@ -289,6 +451,9 @@ def get_proxy_manager() -> ProxyManager:
     if _singleton is None:
         _singleton = ProxyManager()
         _singleton.initialize()
+        # Garantit la persistance du tracker meme si le process est tue (Ctrl+C
+        # ou exception non capturee). atexit s'execute apres sys.exit() / exception.
+        atexit.register(_singleton.bandwidth_flush)
     return _singleton
 
 
@@ -308,9 +473,17 @@ if __name__ == "__main__":
         load_dotenv()
     except ImportError:
         pass
+    # Argument optionnel --reset pour remettre le compteur bandwidth a 0
+    if len(sys.argv) > 1 and sys.argv[1] == "--reset":
+        mgr = get_proxy_manager()
+        mgr.bandwidth_reset()
+        print("[OK] Compteur bandwidth remis a 0.")
+        sys.exit(0)
     mgr = get_proxy_manager()
     print()
     print(mgr.status_report())
+    print()
+    print(mgr.bandwidth_report())
     print()
     if mgr.has_healthy_proxy():
         entry = mgr.current_proxy()

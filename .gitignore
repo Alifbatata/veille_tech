@@ -34,6 +34,9 @@ data/seen_urls.json
 data/recap_preview.html
 data/test_preview.html
 data/_backup_*/
+data/proxy_bandwidth.json
+data/discovered_actors.json
+data/query_stats.json
 
 # =============================================================================
 # Logs

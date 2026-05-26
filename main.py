@@ -1789,6 +1789,16 @@ def main() -> None:
         except Exception as e:
             logger.error("❌ Erreur inattendue lors de l'envoi de l'email : %s", e)
 
+        # Affichage rapport bande passante proxy (si proxy configure)
+        try:
+            from src.proxy_manager import get_proxy_manager
+            _proxy_mgr = get_proxy_manager()
+            _proxy_mgr.bandwidth_flush()
+            if _proxy_mgr._pool:
+                logger.info("\n" + _proxy_mgr.bandwidth_report())
+        except Exception:
+            pass
+
         logger.info("🎉 Orchestrateur terminé avec succès.")
 
     except Exception as e:

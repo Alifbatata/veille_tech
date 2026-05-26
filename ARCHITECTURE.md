@@ -199,12 +199,18 @@ Module `src/proxy_manager.py` gère un pool de 1 à 3 proxies chargés depuis `.
 - **Auto-recovery** : un proxy marqué down est retesté après 60s. S'il revient, réactivation automatique
 - **Seuil adaptatif** : 1 seul proxy → 5 échecs avant disable (mode mono-provider tolérant) ; 2-3 proxies → 3 échecs (rotation rapide)
 - **Mode direct fallback** : si tous les proxies sont down, programme tombe en mode direct sans crasher
-- **Geo-targeting** : variable `PROXY_COUNTRY` (CH/FR/DE/...) injecte automatiquement `-country-XX` dans le username (compatible avec IPRoyal, Decodo, Bright Data)
+- **Geo-targeting** : variable `PROXY_COUNTRY` (CH/FR/DE/...) injecte automatiquement `-country-XX` dans le username (compatible avec IPRoyal, Decodo, Bright Data). **Note** : sur certains trials gratuits (Decodo 100 MB), le geo n'est pas inclus et provoque un 407 ; laisser `PROXY_COUNTRY=` vide.
 - **Sécurité credentials** : jamais loggués en clair, masqués `***:***@host:port`
+- **Tracker de bande passante** : chaque réponse HTTP via le proxy est comptabilisée (taille du body + overhead estimé 2.5 KB pour headers TX/RX). Cumulatif sur tous les runs, persisté dans `data/proxy_bandwidth.json`. Affichage en fin de run.
+- **Circuit-breaker bandwidth** : variable `PROXY_BANDWIDTH_CAP_MB` (en MB). Si le cumul dépasse le cap, le proxy est désactivé pour le reste du run (mode direct forcé). Évite d'exploser un quota trial. Reset manuel via `python -m src.proxy_manager --reset`.
 
-Provider recommandé : **Decodo** (ex-Smartproxy) en mono-provider (~$8.50/GB, $7 minimum).
+**Choix du port Decodo** :
+- **Port 7000** (rotating) : IP différente à chaque requête → optimal pour anti-ban scraping (notre cas)
+- **Port 10001-10010** (sticky) : IP fixe par session → utile pour cookies/login (pas notre cas)
 
-Test : `python -m src.proxy_manager` → liste les proxies, fait health check, affiche statut.
+Provider recommandé : **Decodo** (ex-Smartproxy) en mono-provider (~$8.50/GB, $7 minimum). Trial 100 MB disponible (sans geo-targeting).
+
+Test : `python -m src.proxy_manager` → liste les proxies, fait health check, affiche statut + bandwidth report.
 
 ### Délais aléatoires gaussiens
 
@@ -321,7 +327,8 @@ Action 11 du menu CLI reste disponible pour la revue manuelle des candidats sous
 | **`RESIDENTIAL_PROXY_TERTIARY`** | — | **Optionnelle** 3e proxy (rare) |
 | `AUTO_PROMOTE_MIN_COUNT` | 30 | Seuil count cumulé pour auto-promotion d'un acteur découvert → `targets.json` |
 | `AUTO_PROMOTE_MAX_PER_RUN` | 10 | Cap du nombre d'acteurs promus par run |
-| **`PROXY_COUNTRY`** | `CH` | Code pays geo-targeting |
+| **`PROXY_COUNTRY`** | `CH` | Code pays geo-targeting (laisser vide en trial Decodo gratuit) |
+| **`PROXY_BANDWIDTH_CAP_MB`** | 0 | Plafond bande passante en MB (0 = pas de cap). Recommandé 80 pour trial 100 MB |
 
 ---
 
@@ -410,5 +417,6 @@ veille_tech/
     ├── previous_ai_output.json      # Snapshot run précédent (pour section "Déjà vu")
     ├── articles_archive.json        # Archive cumulative (pour rattrapage)
     ├── scraper_checkpoint.json      # Checkpoint partiel scraping
-    └── discovered_actors.json       # Acteurs découverts auto (Patents/OpenAlex)
+    ├── discovered_actors.json       # Acteurs découverts auto (Patents/OpenAlex)
+    └── proxy_bandwidth.json         # Cumul MB consommées via proxy (cap automatique)
 ```

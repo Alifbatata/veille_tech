@@ -560,6 +560,20 @@ def _get_session() -> curl_requests.Session:
             entry = get_proxy_manager().current_proxy()
             if entry is not None:
                 logger.info(f"🌐 Session routee via proxy : {entry.name} ({entry.masked_url()})")
+            # Wrap Session.request pour tracker la bande passante consommee via proxy.
+            # WHY override de `request` : `get`, `post`, etc. appellent tous `request`
+            # en interne dans curl_cffi -> un seul point d'instrumentation suffit.
+            _mgr_ref = get_proxy_manager()
+            _orig_request = _persistent_session.request
+            def _tracked_request(*args, **kwargs):  # type: ignore[no-untyped-def]
+                response = _orig_request(*args, **kwargs)
+                try:
+                    body_size = len(response.content) if getattr(response, "content", None) else 0
+                    _mgr_ref.add_bytes(body_size)
+                except (AttributeError, OSError):
+                    pass
+                return response
+            _persistent_session.request = _tracked_request  # type: ignore[method-assign]
     # Reroll headers a chaque get_session (UA + Accept-Language + Client Hints coherents avec UA)
     new_ua = random.choice(ROTATING_USER_AGENTS)
     headers_update: dict[str, str] = {
