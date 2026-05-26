@@ -210,6 +210,21 @@ class ProxyManager:
                 )
         for entry in self._pool:
             ok, msg = self._check_proxy_health(entry.url)
+            # Fallback intelligent : un HTTP 407 avec `country-XX` dans l'URL
+            # signifie probablement que le geo-targeting n'est pas inclus dans
+            # le plan (typique des trials gratuits). On retire automatiquement
+            # le -country-XX et on retest, plutot que de basculer en direct.
+            if not ok and "407" in msg and "country-" in entry.url.lower():
+                stripped_url = re.sub(r"-country-[A-Z]{2}", "", entry.url)
+                if stripped_url != entry.url:
+                    logger.info(
+                        f"   🔁 {entry.name} : HTTP 407 avec geo-targeting — "
+                        f"retry sans country (le trial ne le supporte probablement pas)."
+                    )
+                    ok2, msg2 = self._check_proxy_health(stripped_url)
+                    if ok2:
+                        entry.url = stripped_url  # adopte la version sans country
+                        ok, msg = ok2, msg2
             entry.healthy = ok
             entry.last_check = time.monotonic()
             if ok:
