@@ -261,9 +261,19 @@ def _is_gemma(model_name: str) -> bool:
 
 # Import des entreprises cibles pour le prompt dynamique et la vérification Python
 try:
-    from config import TARGET_COMPANIES
+    from config import TARGET_COMPANIES, KEYWORDS, SOLO_KEYWORDS, RESEARCH_ORGS, CROSS_DOMAIN_TOPICS
+    from scoring_v2 import (
+        build_target_profile as _v2_build_target_profile,
+        pre_rank_articles as _v2_pre_rank_articles,
+        apply_v2_pipeline as _v2_apply_pipeline,
+    )
 except ImportError:
-    from src.config import TARGET_COMPANIES
+    from src.config import TARGET_COMPANIES, KEYWORDS, SOLO_KEYWORDS, RESEARCH_ORGS, CROSS_DOMAIN_TOPICS
+    from src.scoring_v2 import (
+        build_target_profile as _v2_build_target_profile,
+        pre_rank_articles as _v2_pre_rank_articles,
+        apply_v2_pipeline as _v2_apply_pipeline,
+    )
 
 # ---------------------------------------------------------------------------
 # Prompt système — focus innovation transférable PVD/ALD (cross-domaine)
@@ -307,15 +317,48 @@ Exemples concrets de transferts à fort potentiel :
   • Quantum dots → couleurs et effets optiques par ALD
   • Self-assembly monolayers → couches d'accroche pour PVD
 
-━━━ ÉCHELLE DE SCORE 1-5 ━━━
-  5 — INNOVATION DIRECTEMENT TRANSFÉRABLE : technique mature dans son domaine,
-      intégration immédiate possible avec PVD/ALD/CVD, impact business évident
+━━━ RUBRIQUE D'ÉVALUATION G-EVAL (5 axes) ━━━
+Pour CHAQUE article, évalue mentalement les 5 axes ci-dessous, puis synthétise en un score global 1-5.
+Cette rubrique est explicite pour éviter les biais cognitifs (position bias, halo effect).
+
+  A. PERTINENCE TECHNIQUE : l'article décrit-il une technique / découverte / mesure
+     concrète (vs marketing vague) ? Présence de données chiffrées, méthodologie ?
+
+  B. TRANSFÉRABILITÉ vers PVD/ALD/CVD : l'idée peut-elle être implémentée via
+     dépôt en couches minces dans un délai raisonnable (mature ou prototype crédible) ?
+
+  C. MATURITÉ TRL : niveau de maturité (lab pur académique TRL 1-3, prototype
+     TRL 4-6, validation industrielle TRL 7-9). Plus mature = plus actionnable.
+
+  D. SIGNAL CONCURRENTIEL : un de nos concurrents/labos listés est-il cité ?
+     Article révèle-t-il un nouveau brevet/produit/procédé chez eux ?
+
+  E. PONT CROSS-DOMAINE : l'article vient-il d'un autre domaine (photonique,
+     MEMS, biomim, nanotech, IA process) avec un angle d'intégration crédible ?
+
+━━━ ÉCHELLE DE SCORE GLOBAL 1-5 ━━━
+  5 — INNOVATION DIRECTEMENT TRANSFÉRABLE : technique mature, intégration
+      immédiate possible avec PVD/ALD/CVD, impact business évident
       OU découverte majeure d'un concurrent listé ci-dessous.
+      Conditions typiques : A>=0.8, B>=0.8, C>=0.5 OU D=1
   4 — PONT INNOVANT : nécessite adaptation mais le potentiel cross-domaine est clair
       (ex: metasurfaces photoniques → décoratif via PVD)
+      Conditions typiques : A>=0.6, B>=0.6, E>=0.7
   3 — LECTURE LATÉRALE : connexion possible mais pas évidente, à garder en veille
+      Conditions typiques : A>=0.5, B>=0.3
   2 — MARGINAL : tangent au sujet, peu probable de transfert
   1 — HORS-SUJET : aucune connexion crédible avec dépôts en couches minces
+
+━━━ CONFIDENCE (NOUVEAU) ━━━
+Tu DOIS retourner aussi un champ "confidence" entre 0.0 et 1.0 reflétant a quel
+point tu es sûr de ton score :
+  • 1.0 = certitude absolue (article très clair, critères tranchés)
+  • 0.7 = score solide mais marge d'interprétation
+  • 0.5 = doute notable (le re-scoring auto se déclenchera < 0.5)
+  • 0.3 = forte incertitude (résumé très court, sujet à la frontière)
+
+Sois HONNÊTE sur ta confidence : sur-évaluer la certitude est plus dommageable
+qu'un doute exprimé (qui déclenchera une 2e validation par un autre modèle).
 
 ━━━ JUSTIFICATION ━━━
 Dans le champ "justification", tu DOIS :
@@ -338,6 +381,7 @@ tu DOIS appliquer SANS EXCEPTION :
   • L'article est TOUJOURS retenu, même s'il semble partiellement marketing
   • Le score minimal est 4 (Innovation solide)
   • Si l'article révèle un nouveau produit/procédé/brevet, le score est 5
+  • Confidence minimum 0.8 (le filet Python rattrapera de toute façon)
   • Mentionne explicitement le nom du concurrent dans "justification"
   • Ajoute un tag avec le nom exact dans "tags"
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -354,7 +398,8 @@ Réponds UNIQUEMENT avec un objet JSON valide respectant STRICTEMENT ce format e
   "retained": [
     {{
       "id": [ID numérique de l'article fourni dans le prompt, ex: 0, 1, 2],
-      "score": [Note de 1 à 5 selon l'échelle ci-dessus],
+      "score": [Note 1-5 selon l'echelle ci-dessus],
+      "confidence": [Float 0.0-1.0, ta certitude sur ce score],
       "justification": "Angle d'intégration PVD/ALD concret + acteurs cités + domaine d'application si pertinent",
       "tags": ["tag1", "tag2"]
     }}
@@ -684,6 +729,20 @@ def _parse_json_response(raw: str) -> dict[str, Any]:
             type(parsed["tldr"]).__name__,
         )
         parsed["tldr"] = str(parsed["tldr"])
+
+    # Normalisation gracieuse du champ "confidence" (nouveau dans prompt v2).
+    # Si absent : default 0.8 (assumed reasonable). Si type invalide : clamp.
+    # On normalise dans le parser pour que le code consommateur n'ait pas a
+    # gerer plusieurs formats. Borne dans [0.0, 1.0].
+    for entry in parsed.get("retained", []):
+        if not isinstance(entry, dict):
+            continue
+        conf = entry.get("confidence", 0.8)
+        try:
+            conf = float(conf)
+        except (TypeError, ValueError):
+            conf = 0.8
+        entry["confidence"] = max(0.0, min(1.0, conf))
 
     return parsed
 
@@ -1043,6 +1102,165 @@ def _force_company_scores(
 
 
 # ---------------------------------------------------------------------------
+# Multi-judge ensemble — re-scoring cible sur articles top-tier ou low-confidence
+# ---------------------------------------------------------------------------
+
+# Configuration via .env (defaults industriels)
+MULTI_JUDGE_ENABLED: bool = os.environ.get("MULTI_JUDGE_ENABLED", "true").lower() in ("true", "1", "yes")
+MULTI_JUDGE_TRIGGER_SCORE: int = int(os.environ.get("MULTI_JUDGE_TRIGGER_SCORE", "4"))
+MULTI_JUDGE_TRIGGER_CONFIDENCE: float = float(os.environ.get("MULTI_JUDGE_TRIGGER_CONFIDENCE", "0.5"))
+MULTI_JUDGE_MODEL: str = os.environ.get("MULTI_JUDGE_MODEL", "")
+# Cap : on ne re-score jamais plus que N articles pour proteger le quota
+# (au pire 1 appel API au modele alternatif si N <= AI_BATCH_SIZE).
+MULTI_JUDGE_MAX_CANDIDATES: int = int(os.environ.get("MULTI_JUDGE_MAX_CANDIDATES", "50"))
+
+
+def _pick_second_judge_model_name(primary_model_name: str) -> str:
+    """Retourne le nom d'un modele DIFFERENT du primaire pour un 2nd judge.
+
+    Si MULTI_JUDGE_MODEL est defini en env, on l'utilise. Sinon, on prend le
+    1er modele alternatif disponible dans la cascade (priorite : Gemma puis Lite).
+    """
+    if MULTI_JUDGE_MODEL:
+        return MULTI_JUDGE_MODEL
+    try:
+        chain = _build_full_chain()
+    except Exception:
+        chain = list(_STATIC_FALLBACK_CHAIN)
+    primary_normalized = _normalize_model_id(primary_model_name)
+    for name in chain:
+        if _normalize_model_id(name) != primary_normalized:
+            return name
+    return ""
+
+
+def _run_multi_judge(
+    retained_articles: list[dict[str, Any]],
+    primary_model_name: str,
+    companies: list[str],
+) -> dict[str, Any]:
+    """Re-score les articles selectionnes (score>=trigger OU confidence<trigger)
+    via un 2nd modele de la cascade Gemini.
+
+    Strategie de fusion (recherche 2025) :
+      - Concurrent cite → MAX (minority-veto, evite under-scoring concurrents)
+      - Sinon → moyenne arrondie des 2 scores (correction agreeableness bias)
+      - Conserve les scores individuels dans le champ "score_judges" pour audit
+
+    Cap MULTI_JUDGE_MAX_CANDIDATES articles pour proteger le quota.
+
+    Returns:
+        Dict { "rescored_count": int, "judge_2_name": str, "score_changes": int }
+    """
+    summary = {"rescored_count": 0, "judge_2_name": "", "score_changes": 0}
+    if not MULTI_JUDGE_ENABLED or not retained_articles:
+        return summary
+
+    # Selection des candidats : top-tier OU low-confidence
+    candidates_idx: list[int] = []
+    for i, art in enumerate(retained_articles):
+        score = int(art.get("score", 0))
+        conf = float(art.get("confidence", 1.0))
+        if score >= MULTI_JUDGE_TRIGGER_SCORE or conf < MULTI_JUDGE_TRIGGER_CONFIDENCE:
+            candidates_idx.append(i)
+    if not candidates_idx:
+        return summary
+
+    # Cap pour proteger le quota
+    if len(candidates_idx) > MULTI_JUDGE_MAX_CANDIDATES:
+        # Priorise les low-confidence d'abord (plus a risque)
+        candidates_idx.sort(
+            key=lambda i: retained_articles[i].get("confidence", 1.0),
+        )
+        candidates_idx = candidates_idx[:MULTI_JUDGE_MAX_CANDIDATES]
+
+    judge2_name = _pick_second_judge_model_name(primary_model_name)
+    if not judge2_name:
+        logger.info("ℹ️ Multi-judge : aucun modele alternatif distinct dispo, skip.")
+        return summary
+
+    logger.info(
+        f"⚖️  Multi-judge : {len(candidates_idx)} article(s) re-evalues "
+        f"(trigger : score>={MULTI_JUDGE_TRIGGER_SCORE} OU confidence<{MULTI_JUDGE_TRIGGER_CONFIDENCE:.2f}) "
+        f"via {judge2_name}."
+    )
+
+    try:
+        judge2 = _build_model(judge2_name)
+    except (google_exceptions.GoogleAPIError, OSError, ValueError) as e:
+        logger.warning(f"⚠️ Multi-judge : echec init {judge2_name} : {e}. Skip.")
+        return summary
+
+    # Construit un batch dedie pour le 2nd judge (champs minimaux)
+    j2_batch = [
+        {
+            "title":   retained_articles[i].get("title", ""),
+            "summary": retained_articles[i].get("summary", ""),
+            "source":  retained_articles[i].get("source", ""),
+        }
+        for i in candidates_idx
+    ]
+    try:
+        j2_result = _process_batch(judge2, j2_batch, offset=0)
+    except (google_exceptions.GoogleAPIError, ValueError, OSError) as e:
+        logger.warning(f"⚠️ Multi-judge : appel {judge2_name} echoue : {e}. Garde scores originaux.")
+        return summary
+
+    j2_retained = j2_result.get("retained", [])
+    j2_by_id = {entry.get("id"): entry for entry in j2_retained if isinstance(entry, dict)}
+
+    companies_lower = set(c.lower() for c in (companies or []))
+    score_changes = 0
+
+    for j2_idx, orig_idx in enumerate(candidates_idx):
+        j2_entry = j2_by_id.get(j2_idx)
+        if not j2_entry:
+            # Le 2nd judge a rejete l'article (pas de bug : il peut etre plus stricte)
+            # On garde le score original mais on marque que le 2nd judge n'a pas confirme
+            retained_articles[orig_idx]["judge_2_rejected"] = True
+            continue
+
+        original_score = int(retained_articles[orig_idx].get("score", 0))
+        j2_score = int(j2_entry.get("score", original_score))
+        j2_conf = float(j2_entry.get("confidence", 0.5))
+
+        text_blob = (
+            retained_articles[orig_idx].get("title", "") + " "
+            + retained_articles[orig_idx].get("summary", "")
+        ).lower()
+        has_competitor = any(c in text_blob for c in companies_lower) if companies_lower else False
+
+        if has_competitor:
+            final_score = max(original_score, j2_score)
+        else:
+            final_score = round((original_score + j2_score) / 2)
+
+        if final_score != original_score:
+            score_changes += 1
+            logger.debug(
+                f"   ⚖️  Article #{orig_idx} re-score : {original_score} -> {final_score} "
+                f"(judge2={j2_score}, conf={j2_conf:.2f}, concurrent={has_competitor})"
+            )
+
+        retained_articles[orig_idx]["score"] = final_score
+        retained_articles[orig_idx]["score_judges"] = [original_score, j2_score]
+        retained_articles[orig_idx]["confidence_avg"] = round(
+            (retained_articles[orig_idx].get("confidence", 0.8) + j2_conf) / 2, 2
+        )
+
+    summary["rescored_count"] = len(candidates_idx)
+    summary["judge_2_name"] = judge2_name
+    summary["score_changes"] = score_changes
+
+    if score_changes > 0:
+        logger.info(
+            f"⚖️  Multi-judge : {score_changes}/{len(candidates_idx)} score(s) ajuste(s) "
+            f"par consensus avec {judge2_name}."
+        )
+    return summary
+
+
+# ---------------------------------------------------------------------------
 # Synthèse finale — Executive Summary global
 # ---------------------------------------------------------------------------
 
@@ -1266,6 +1484,19 @@ def filter_articles_with_ai(
         logger.warning("⚠️ Tous les articles ont ete rejetes par le pre-filtre.")
         return _empty_result(input_count, min_score)
 
+    # ── Pre-ranking embeddings (scoring_v2) : 2e couche d'economie tokens ────
+    # Calcule la cosine similarity entre chaque article et le profil cible
+    # (concat des 5 listes targets.json) via sentence-transformers (local, gratuit)
+    # ou TF-IDF fallback. Coupe la queue (sim < seuil) en gardant au moins 80%
+    # du flux. Attache "prerank_similarity" a chaque article pour reuse par MMR.
+    target_profile = _v2_build_target_profile(
+        TARGET_COMPANIES, KEYWORDS, SOLO_KEYWORDS, RESEARCH_ORGS, CROSS_DOMAIN_TOPICS,
+    )
+    articles, prerank_rejected = _v2_pre_rank_articles(articles, target_profile)
+    if not articles:
+        logger.warning("⚠️ Tous les articles ont ete rejetes par le pre-rank embeddings.")
+        return _empty_result(input_count, min_score)
+
     # Initialisation du client (lève GeminiUnavailableError si clé absente)
     model = _init_client()
 
@@ -1324,6 +1555,7 @@ def filter_articles_with_ai(
             all_retained.append({
                 # Métadonnées IA
                 "score":         score,
+                "confidence":    float(entry.get("confidence", 0.8)),
                 "justification": entry.get("justification", ""),
                 "tags":          list(dict.fromkeys(entry.get("tags", []))),
                 # Données originales de l'article
@@ -1333,14 +1565,28 @@ def filter_articles_with_ai(
                 "source":        original.get("source", ""),
                 "category":      original.get("category", ""),
                 "collected_at":  original.get("collected_at", ""),
+                # Métadonnée scoring_v2 (utile pour MMR + debug)
+                "prerank_similarity": float(original.get("prerank_similarity", 0.0)),
             })
 
         # Pause courtoise entre les batchs pour respecter les rate limits
         if batch_idx < len(batches) - 1:
             time.sleep(1.5)
 
-    # Tri décroissant par score (avant la génération du résumé pour que le top soit en premier)
+    # ── Multi-judge ciblé : re-scoring sur articles top-tier OU low-confidence ─
+    # Reduit l'erreur du single-judge (recherche IJCNLP 2025 : 3-judge → F1 97-98%).
+    # On vise top-tier ET low-confidence pour limiter les requetes additionnelles.
+    multi_judge_meta = _run_multi_judge(all_retained, _active_model_name, TARGET_COMPANIES)
+
+    # Tri décroissant par score APRES multi-judge (les scores peuvent avoir bouge)
     all_retained.sort(key=lambda x: x["score"], reverse=True)
+
+    # ── scoring_v2 pipeline : MMR diversification + tracking calibration ────
+    # Reordonne le top 60 par Maximal Marginal Relevance (lambda=0.7) pour eviter
+    # que 5 articles "metasurfaces" ne saturent le top de l'email. Trace aussi
+    # la distribution des scores inter-runs (drift detection).
+    all_retained, v2_meta = _v2_apply_pipeline(all_retained)
+    v2_meta["multi_judge"] = multi_judge_meta
 
     # ── Génération du résumé exécutif global via un appel Gemini dédié ──────
     # Cette synthèse remplace la simple concaténation des tldrs par batch :
@@ -1356,11 +1602,13 @@ def filter_articles_with_ai(
             "model":            _active_model_name,
             "input_count":      input_count,
             "retained_count":   len(all_retained),
-            "rejected_count":   total_rejected + prefilter_rejected,
+            "rejected_count":   total_rejected + prefilter_rejected + prerank_rejected,
             "prefilter_rejected": prefilter_rejected,
+            "prerank_rejected": prerank_rejected,
             "batch_count":      len(batches),
             "min_score_filter": min_score,
             "tldr":             executive_summary,
+            "scoring_v2":       v2_meta,
         },
         "articles": all_retained,
     }

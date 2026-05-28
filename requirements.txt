@@ -5,3 +5,13 @@ pandas==2.2.3
 python-dotenv
 curl_cffi
 rich>=13.7
+# scoring_v2 — pre-ranking BM25 (priorite, ~20 KB) + TF-IDF (fallback) pour MMR.
+# Tous gratuits, locaux, aucun modele a telecharger, optimal pour vocab technique.
+# Si absent : pipeline tourne quand meme (no-op gracieux).
+rank_bm25>=0.2.2
+scikit-learn>=1.4.0
+numpy>=1.26.0
+# Optionnel : sentence-transformers (boost MMR semantique, 22 MB modele + torch ~500 MB).
+# Active uniquement si tu set ST_OPTIONAL_ENABLED=true dans .env.
+# Pas necessaire pour la qualite par defaut (TF-IDF suffit largement).
+# sentence-transformers>=2.7.0

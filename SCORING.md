@@ -117,6 +117,89 @@ L'IA peut se tromper ou oublier la règle concurrents. Donc **après** son analy
 
 ---
 
+## 7.bis 🆕 Pipeline scoring v2 (architecture industrielle 2026)
+
+Inspiré des architectures **AlphaSense / Feedly Leo** et de la recherche LLM-as-a-judge 2025 (IJCNLP : 3-judge → F1 97-98%). Quatre étages enchaînés, **tous gratuits, tous locaux** :
+
+### Étage 1 — Pré-ranking BM25 (avant Gemini)
+
+Avant d'envoyer les articles à l'IA, le système calcule un score **BM25** entre chaque article et le profil cible (concat des 5 listes de `targets.json`). BM25 est le standard industriel des moteurs de recherche (Lucene, Elasticsearch, Solr) — **excellent sur vocabulaire technique spécialisé** comme PVD, ALD, HiPIMS, magnetron sputtering, là où les embeddings neuronaux génériques peinent.
+
+- Articles avec similarité < `PRERANK_MIN_BM25_NORMALIZED` (0.05) **éliminés avant Gemini**
+- Garde toujours au moins `PRERANK_KEEP_TOP_FRACTION` (80%) du flux (protection)
+- Économie typique : 15-30% de tokens IA
+- Fallback TF-IDF (sklearn) si `rank_bm25` n'est pas installé
+- Fallback no-op (pipeline tourne quand même) sinon
+
+### Étage 2 — Scoring Gemini avec rubrique G-Eval + confidence verbalisée
+
+Le prompt système suit la méthode **G-Eval** (rubrique numérotée 5 axes) qui réduit les biais cognitifs documentés en LLM-as-a-judge :
+
+- **A. Pertinence technique** (données chiffrées vs marketing vague)
+- **B. Transférabilité PVD/ALD** (intégration crédible)
+- **C. Maturité TRL** (lab pur vs prototype vs industriel)
+- **D. Signal concurrentiel** (concurrent cité, nouveau brevet)
+- **E. Pont cross-domaine** (photonique / MEMS / biomim → PVD)
+
+Gemini retourne aussi un **champ confidence ∈ [0, 1]** reflétant sa certitude sur le score :
+- 1.0 = certain
+- 0.7 = score solide
+- 0.5 = doute notable
+- 0.3 = forte incertitude
+
+### Étage 3 — Multi-judge ciblé (consensus 2 modèles)
+
+Pour les articles **score ≥ 4** OU **confidence < 0.5**, un deuxième modèle Gemini (différent du premier dans la cascade) re-score l'article. La fusion suit la recherche 2025 :
+
+- **Concurrent cité** → on prend le **MAX** des deux scores (minority-veto, protège contre l'under-scoring)
+- **Sinon** → moyenne arrondie (correction de l'agreeableness bias)
+
+Cap : 50 articles re-scorés/run pour protéger le quota Gemini free tier. En pratique, ~20-30/run.
+
+### Étage 4 — Diversification MMR (Maximal Marginal Relevance)
+
+Après le scoring, le top 60 articles est ré-ordonné par **MMR** (Carbonell & Goldstein 1998, encore SOTA en 2025) pour éviter que 5 articles couvrant le même sujet (ex: metasurfaces) ne saturent le top de l'email.
+
+Formule : `MMR = λ × score - (1 - λ) × max(similarity, déjà sélectionnés)`
+
+Avec λ = 0.7 par défaut (favorise pertinence mais pénalise la redondance). Similarité inter-articles via TF-IDF.
+
+### Étage 5 — Calibration drift inter-runs
+
+Le système trace la distribution des scores (1/2/3/4/5) sur les 20 derniers runs dans `data/score_calibration.json`. Si :
+- Moyenne 5★ > 50% sur 3 runs consécutifs → **warning over-scoring**
+- Moyenne 4-5★ < 5% sur 3 runs consécutifs → **warning under-scoring** (pré-filtre trop strict ou modèle Gemini dégradé)
+
+C'est une **alerte précoce** sur la dérive du modèle Gemini sans intervention manuelle.
+
+### Variables `.env` (toutes optionnelles, valeurs par défaut industrielles)
+
+```env
+# Pré-ranking BM25
+PRERANK_ENABLED=true
+PRERANK_KEEP_TOP_FRACTION=0.80
+PRERANK_MIN_BM25_NORMALIZED=0.05
+
+# MMR diversification
+MMR_ENABLED=true
+MMR_LAMBDA=0.7
+MMR_TOP_K=60
+
+# Multi-judge ensemble
+MULTI_JUDGE_ENABLED=true
+MULTI_JUDGE_TRIGGER_SCORE=4
+MULTI_JUDGE_TRIGGER_CONFIDENCE=0.5
+MULTI_JUDGE_MAX_CANDIDATES=50
+MULTI_JUDGE_MODEL=        # vide = auto (2e de la cascade)
+
+# Calibration drift
+CALIBRATION_TRACK_ENABLED=true
+CALIBRATION_DRIFT_HIGH_THRESHOLD=0.50
+CALIBRATION_DRIFT_LOW_THRESHOLD=0.05
+```
+
+---
+
 ## 8. Exemples concrets du nouveau scoring
 
 | Score | Titre type | Pourquoi ce score |

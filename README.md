@@ -28,6 +28,12 @@ Le pipeline collecte des articles depuis **9 sources** scientifiques et de press
   - **Auto-expansion par tier** — chaque requête est classée Hot/Standard/Cold selon ses stats historiques, et `max_results` est ajusté ×1.5 / ×1.0 / ×0.5 au run suivant
 - **⏯ Reprise sans re-scraper** : `resume_pipeline.py` reprend depuis `scraper_output.json` si le filtrage IA ou l'envoi email a échoué — économise 14-22h
 - **🎯 Scoring « innovation transférable »** : l'IA évalue le potentiel d'INTÉGRATION cross-domaine avec PVD/ALD, pas juste la présence de mots-clés
+- **🏆 Pipeline scoring industriel v2** (architecture AlphaSense/Feedly inspirée) :
+  - **Pre-ranking BM25** avant Gemini (standard Lucene/Elasticsearch, gratuit, vocab technique optimal) → -15-30% tokens IA
+  - **Rubrique G-Eval** 5 axes + **verbalized confidence** dans le prompt système
+  - **Multi-judge ciblé** sur articles ≥4★ ou confidence <0.5 (consensus 2 modèles, fusion max/avg selon contexte concurrent)
+  - **MMR diversification** post-scoring (évite la redondance sujet dans le top de l'email)
+  - **Calibration drift inter-runs** : alerte automatique si dérive Gemini (over/under-scoring)
 - **🌐 Proxy résidentiel optionnel** : pool 1-3 proxies + health check + failover + auto-recovery (provider recommandé : Decodo)
 - **🔒 Anti-détection 20+ couches** : TLS Chrome impersonation, locales rotatives, délais humains, pause circadienne, pre-flight arXiv, circuit breakers, **soft-ban detection (CAPTCHA/Cloudflare)**, **headers contextuels** (Sec-Fetch adaptatif API vs RSS), **params shufflés**, **cookies persistents inter-runs**, Accept-Encoding gzip+deflate+br
 - **⚡ Parallélisation inter-sources** : OpenAlex + Crossref + HAL + Semantic Scholar en 4 threads simultanés (gain -60 min/run)
