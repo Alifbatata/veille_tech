@@ -22,7 +22,10 @@ Le pipeline collecte des articles depuis **9 sources** scientifiques et de press
 
 - **🌐 Recherche cross-domaine** : 36 thèmes pré-remplis (photonique, MEMS, biomim, nanotech, métamatériaux, IA, décoratif) broadcastés sur les 7 sources scientifiques
 - **🔍 Découverte automatique d'acteurs** : extraction continue des entreprises (Patents) et labos (OpenAlex) non listés. Section dédiée dans l'email + revue interactive CLI
-- **♿ Auto-promotion vers `targets.json`** : un acteur récurrent (count cumulé ≥ 30) est promu automatiquement à la fin du run, classifié `companies` ou `research_orgs` selon heuristique (cap 10/run, configurable via `AUTO_PROMOTE_MIN_COUNT` / `AUTO_PROMOTE_MAX_PER_RUN`)
+- **🤖 Auto-tuning (boucle de feedback continue)** : à la fin de chaque run, `src/auto_tuner.py` exécute :
+  - **Auto-promote v2** — acteurs récurrents (count ≥ 5 + apparus sur ≥ 2 runs distincts) ajoutés à `targets.json` avec heuristique de classification enrichie
+  - **Auto-purge** — cibles stériles depuis ≥ 8 runs (jamais de hit, jamais) automatiquement retirées (avec backup atomique + archive rollback)
+  - **Auto-expansion par tier** — chaque requête est classée Hot/Standard/Cold selon ses stats historiques, et `max_results` est ajusté ×1.5 / ×1.0 / ×0.5 au run suivant
 - **⏯ Reprise sans re-scraper** : `resume_pipeline.py` reprend depuis `scraper_output.json` si le filtrage IA ou l'envoi email a échoué — économise 14-22h
 - **🎯 Scoring « innovation transférable »** : l'IA évalue le potentiel d'INTÉGRATION cross-domaine avec PVD/ALD, pas juste la présence de mots-clés
 - **🌐 Proxy résidentiel optionnel** : pool 1-3 proxies + health check + failover + auto-recovery (provider recommandé : Decodo)

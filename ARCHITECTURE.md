@@ -293,18 +293,62 @@ Implémentée comme JSON FIFO de 10 000 URLs max. 3 modes utilisateur :
 - **Tout renvoyer** : tous les articles passent, badge violet `📌 Déjà envoyé` sur ceux déjà vus auparavant
 - **Reset** : vide `seen_urls.json` puis filtre normal
 
-### Découverte d'acteurs cumulative + auto-promotion
+### Découverte d'acteurs cumulative
 
-`data/discovered_actors.json` agrège inter-runs les noms d'entités vues dans les résultats. Compteur d'occurrences = signal de fréquence.
+`data/discovered_actors.json` agrège inter-runs les noms d'entités vues dans les résultats Patents et OpenAlex. Trois champs clés persistés :
+- `count` — somme cumulée des occurrences (incrémentée à chaque hit dans n'importe quel run)
+- `appearances_runs` — nombre de runs **distincts** où l'acteur a été vu (incrémenté +1 par run, indépendant de `count`)
+- `sources` — liste des sources qui ont mentionné l'acteur
 
-**Auto-promotion (`scraper.py:auto_promote_actors`)** : à la fin de `run_scraper()`, les acteurs avec count cumulé `≥ AUTO_PROMOTE_MIN_COUNT` (défaut 30) sont automatiquement ajoutés à `targets.json` via `config.save_targets()`. Classification via `_classify_actor()` :
-- Mots-clés labo (`university`, `institut`, `cnrs`, `fraunhofer`, `synchrotron`, …) → `research_orgs`
-- Suffixes entreprise (`gmbh`, `ag`, `inc`, `ltd`, `corp`, `s.a.`, `b.v.`, …) → `companies`
-- Fallback : source `openalex` seule → `research_orgs`, `patents` seule → `companies`
+Cette distinction `count` vs `appearances_runs` permet à l'auto-tuner d'imposer une condition de **stickiness** (un acteur doit revenir sur ≥2 runs distincts, pas juste spike dans un seul run).
 
-Cap `AUTO_PROMOTE_MAX_PER_RUN` (défaut 10) pour éviter une explosion du nombre de requêtes futures (chaque acteur ajouté est broadcasté sur 7 sources scientifiques = +7 requêtes/run/acteur).
+### 🆕 Auto-tuning (`src/auto_tuner.py`) — boucle d'amélioration continue
 
-Action 11 du menu CLI reste disponible pour la revue manuelle des candidats sous le seuil (accept→companies, accept→research_orgs, reject).
+À la fin de chaque `run_scraper()`, le module `auto_tuner.run_full_tuning()` exécute en séquence :
+
+#### Étape A — Backup atomique de `targets.json`
+Snapshot horodaté `data/backups/targets_YYYYMMDD_HHMMSS.json`, rotation des 10 derniers. Permet le rollback manuel si l'auto-tuning fait une erreur de jugement.
+
+#### Étape B — Auto-promote v2 (`auto_promote_actors_v2`)
+Critères stricts (TOUS requis) :
+- `count >= AUTO_PROMOTE_MIN_COUNT` (défaut 5, vs 30 v1)
+- `appearances_runs >= AUTO_PROMOTE_MIN_RUNS` (défaut 2) — **stickiness inter-runs**
+- Non présent dans `targets.json` (companies/research_orgs)
+
+Heuristique de classification enrichie (`_classify_actor`) :
+- Mots-clés labo (`university`, `institut`, `cnrs`, `fraunhofer`, `hochschule`, `synchrotron`, `epfl`, `ethz`, `mit`, `caltech`, `kaist`, …) → `research_orgs`
+- Suffixes entreprise (`gmbh`, `ag`, `inc`, `ltd`, `corp`, `technologies`, `systems`, `industries`, `coatings`, `materials`, …) → `companies`
+- Fallback source : `openalex` seule → `research_orgs`, `patents` seule → `companies`
+
+Cap `AUTO_PROMOTE_MAX_PER_RUN` (défaut 10).
+
+#### Étape C — Auto-purge des cibles stériles (`auto_purge_sterile_targets`)
+Une cible (`solo_keywords` / `cross_domain_topics` / `research_orgs`) est retirée SI ET SEULEMENT SI :
+- `runs_total >= AUTO_PURGE_MIN_RUNS` (défaut 8) — assez d'historique
+- `hits_total == 0` sur **toutes** les sources qui l'ont essayée — protection croisée
+- `consecutive_zeros >= AUTO_PURGE_MIN_CONSECUTIVE_ZEROS` (défaut 8) sur au moins une source
+
+Cap `AUTO_PURGE_MAX_PER_RUN` (défaut 5). Les `companies` et `keywords` sont **exemptés** (combinés en OR-groups GNews → attribution individuelle impossible).
+
+Les cibles supprimées sont archivées dans `data/archived_targets.json` (cap 50 entrées) pour rollback manuel.
+
+#### Étape D — Recalcul des tiers de requêtes (`compute_max_results`)
+Au démarrage du run suivant, chaque appel à `fetch_openalex_works(query, max_results=25)` (et les 6 autres fetch_*) passe par `_tuned_max_results(query, "openalex", 25)` qui calcule :
+
+| Tier | Critère | Multiplicateur | Effet |
+|---|---|---|---|
+| **Hot** | top `AUTO_EXPAND_HOT_PERCENTILE`% (10%) des `hits_total` | `× 1.5` | Plus de couverture sur les requêtes productives |
+| **Cold** | `consecutive_zeros >= AUTO_EXPAND_COLD_CONSECUTIVE_ZEROS` (3) | `× 0.5` | Économie bandwidth/quotas sur les requêtes peu fertiles |
+| **Standard** | reste | `× 1.0` | Inchangé |
+
+Bornes appliquées : `max_results ∈ [5, 200]`. Cache process-wide via `_tier_cache`, invalidé par `invalidate_tier_cache()` à la fin du run.
+
+#### Mode dry-run et désactivation
+- `AUTO_TUNE_ENABLED=false` désactive tout l'auto-tuning (Étapes B, C, D)
+- `AUTO_TUNE_DRY_RUN=true` log les actions mais ne touche jamais aux fichiers — utile pour audit avant activation
+- Chaque sous-module a son propre switch : `AUTO_PURGE_ENABLED`, `AUTO_EXPAND_ENABLED`
+
+Action 11 et 12 du menu CLI restent disponibles pour la revue/inspection manuelle.
 
 ---
 
@@ -345,8 +389,20 @@ Action 11 du menu CLI reste disponible pour la revue manuelle des candidats sous
 | **`RESIDENTIAL_PROXY_PRIMARY`** | — | **Optionnelle** Proxy résidentiel principal |
 | **`RESIDENTIAL_PROXY_BACKUP`** | — | **Optionnelle** Proxy backup |
 | **`RESIDENTIAL_PROXY_TERTIARY`** | — | **Optionnelle** 3e proxy (rare) |
-| `AUTO_PROMOTE_MIN_COUNT` | 30 | Seuil count cumulé pour auto-promotion d'un acteur découvert → `targets.json` |
-| `AUTO_PROMOTE_MAX_PER_RUN` | 10 | Cap du nombre d'acteurs promus par run |
+| `AUTO_TUNE_ENABLED` | `true` | Master switch de l'auto-tuner (promote v2 + purge + tiers) |
+| `AUTO_TUNE_DRY_RUN` | `false` | `true` = log les actions sans toucher au disque |
+| `AUTO_PROMOTE_MIN_COUNT` | 5 | Seuil count cumulé pour auto-promotion (v2, abaissé de 30) |
+| `AUTO_PROMOTE_MIN_RUNS` | 2 | Stickiness : acteur doit apparaître sur ≥ N runs distincts |
+| `AUTO_PROMOTE_MAX_PER_RUN` | 10 | Cap promotions par run |
+| `AUTO_PURGE_ENABLED` | `true` | Active la suppression auto des cibles stériles |
+| `AUTO_PURGE_MIN_RUNS` | 8 | Historique minimal avant éligibilité purge |
+| `AUTO_PURGE_MIN_CONSECUTIVE_ZEROS` | 8 | Runs consécutifs à 0 requis pour purge |
+| `AUTO_PURGE_MAX_PER_RUN` | 5 | Cap suppressions par run |
+| `AUTO_EXPAND_ENABLED` | `true` | Active les tiers Hot/Standard/Cold sur `max_results` |
+| `AUTO_EXPAND_HOT_MULTIPLIER` | 1.5 | Multiplicateur sur le tier Hot |
+| `AUTO_EXPAND_COLD_MULTIPLIER` | 0.5 | Multiplicateur sur le tier Cold (économie quotas) |
+| `AUTO_EXPAND_HOT_PERCENTILE` | 10 | Top N% des hits_total → Hot |
+| `AUTO_EXPAND_COLD_CONSECUTIVE_ZEROS` | 3 | Seuil consécutifs à 0 pour passer Cold |
 | **`PROXY_COUNTRY`** | `CH` | Code pays geo-targeting (laisser vide en trial Decodo gratuit) |
 | **`PROXY_BANDWIDTH_CAP_MB`** | 0 | Plafond bande passante en MB (0 = pas de cap). Recommandé 80 pour trial 100 MB |
 | **`SCRAPE_PARALLEL_SCIENTIFIC`** | `true` | Lance OpenAlex/Crossref/HAL/S2 en parallèle (4 threads). Gain ~60 min sur run complet |

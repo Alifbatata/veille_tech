@@ -403,20 +403,90 @@ L'ordinateur doit être allumé à l'heure choisie. Sinon, le Planificateur peut
 
 Pour éditer : lance `python main.py`, accepte de modifier les cibles → tu accèdes à un **menu de 14 actions** organisées par couleur. La numérotation correspond aux paires +/- (ajout/suppression) par liste.
 
-### 🆕 Auto-promotion des acteurs découverts
+### 🆕 Auto-tuning (boucle d'amélioration continue)
 
-Pendant les runs, le programme extrait les noms d'entreprises/labos vus dans les résultats Patents et OpenAlex (mais qui ne sont **pas dans tes listes**). Ces candidats sont accumulés dans `data/discovered_actors.json` avec un compteur cumulatif.
+À la fin de chaque run, le module `src/auto_tuner.py` ferme la boucle de feedback automatique. Tu n'as plus besoin d'éditer manuellement `targets.json` la plupart du temps — le système s'optimise tout seul à partir des stats des runs précédents.
 
-**À la fin de chaque run**, un acteur qui dépasse le **seuil de 30 occurrences cumulées** est automatiquement promu vers `targets.json` :
-- Heuristique nom + source détermine si c'est une `company` (suffixes GmbH/Inc/Ltd/...) ou un `research_org` (mots-clés University/Institut/CNRS/Fraunhofer/...).
-- **Cap de 10 promotions par run** pour éviter une explosion du nombre de requêtes futures.
-- Ces seuils sont configurables via `.env` : `AUTO_PROMOTE_MIN_COUNT=30`, `AUTO_PROMOTE_MAX_PER_RUN=10`.
+**Trois actions automatiques en séquence :**
 
-Ta veille **s'enrichit toute seule** au fil des semaines, sans intervention manuelle. Tu peux toujours utiliser **Action 11** du menu d'édition pour revoir / rejeter / ajouter manuellement les candidats sous le seuil :
+#### 1. Auto-promotion v2 — abaissée à 5 occurrences + stickiness
+
+Les acteurs (entreprises/labos) vus régulièrement dans les résultats Patents et OpenAlex sont automatiquement ajoutés à `targets.json` quand :
+- `count >= 5` occurrences cumulées (vs 30 auparavant)
+- **ET** `appearances_runs >= 2` (vus sur au moins 2 runs distincts) — la condition de **stickiness** évite de promouvoir un acteur qui aurait spike sur un seul run (ex: une conférence ponctuelle)
+
+Heuristique de classification enrichie : suffixes entreprise (`GmbH`/`Inc`/`Ltd`/`Technologies`/`Systems`/`Coatings`/...), mots-clés labo (`University`/`Institut`/`Fraunhofer`/`CNRS`/`Hochschule`/...).
+
+Cap : **10 promotions max par run** (configurable).
+
+#### 2. Auto-purge des cibles stériles
+
+Une cible (`solo_keyword`, `cross_domain_topic` ou `research_org`) est **automatiquement retirée** de `targets.json` quand :
+- `runs_total >= 8` (assez d'historique pour juger)
+- `hits_total == 0` (n'a JAMAIS produit un hit, jamais)
+- `consecutive_zeros >= 8` (8 runs consécutifs à 0)
+- **ET** aucune source n'a produit de hit (protection croisée : si la cible est productive sur Crossref mais pas sur OpenAlex, elle reste)
+
+Cap : **5 suppressions max par run** (conservateur). Backup atomique de `targets.json` dans `data/backups/` (rotation 10) avant chaque modification. L'historique des suppressions est conservé dans `data/archived_targets.json` pour rollback possible.
+
+> ⚠️ Les `companies` et `keywords` ne sont **PAS** auto-purgés : ils sont combinés en OR-groups dans les requêtes Google News (14 requêtes au lieu de 294), donc l'attribution individuelle des hits est impossible.
+
+#### 3. Auto-expansion par tier (Hot / Standard / Cold)
+
+Le système classe automatiquement chaque requête `(query, source)` selon son historique de hits :
+
+| Tier | Critère | Effet sur le prochain run |
+|---|---|---|
+| 🔥 **Hot** | Top 10% des hits cumulés | `max_results × 1.5` (plus de couverture sur ce qui marche) |
+| 📊 **Standard** | Le reste | inchangé |
+| 🧊 **Cold** | ≥ 3 runs consécutifs à 0 | `max_results × 0.5` (économie bandwidth/quotas) |
+
+Bornes : `max_results` ∈ `[5, 200]`. Le système s'auto-régule à chaque run.
+
+#### Variables `.env` (toutes optionnelles, valeurs par défaut industrielles)
+
+```env
+AUTO_TUNE_ENABLED=true                  # Master switch (tout désactiver d'un coup)
+AUTO_TUNE_DRY_RUN=false                 # true = log les actions sans toucher au disque
+
+# Auto-promote v2
+AUTO_PROMOTE_MIN_COUNT=5
+AUTO_PROMOTE_MIN_RUNS=2
+AUTO_PROMOTE_MAX_PER_RUN=10
+
+# Auto-purge (très conservateur par défaut)
+AUTO_PURGE_ENABLED=true
+AUTO_PURGE_MIN_RUNS=8
+AUTO_PURGE_MIN_CONSECUTIVE_ZEROS=8
+AUTO_PURGE_MAX_PER_RUN=5
+
+# Auto-expansion par tier
+AUTO_EXPAND_ENABLED=true
+AUTO_EXPAND_HOT_MULTIPLIER=1.5
+AUTO_EXPAND_COLD_MULTIPLIER=0.5
+AUTO_EXPAND_HOT_PERCENTILE=10
+AUTO_EXPAND_COLD_CONSECUTIVE_ZEROS=3
+```
+
+#### Mode dry-run (audit avant activation)
+
+Pour voir ce que le système ferait sans rien modifier :
+
+```powershell
+$env:AUTO_TUNE_DRY_RUN="true"; python main.py
+```
+
+Les logs afficheront `🧪 [DRY-RUN] ...` pour chaque action qui aurait été prise.
+
+#### Revue manuelle reste toujours disponible
+
+Tu peux toujours utiliser **Action 11** du menu d'édition (`python main.py` → menu édition) pour revoir / rejeter / ajouter manuellement les acteurs sous le seuil d'auto-promotion :
 - `aN` → ajouter le candidat #N à `companies`
 - `lN` → ajouter le candidat #N à `research_orgs`
 - `rN` → rejeter (retirer des candidats)
 - `q` → quitter la revue
+
+Et **Action 12** pour voir les stats des requêtes (top 15 productives / top 15 stériles / tendance inter-runs) — c'est sur ces stats que l'auto-tuner se base.
 
 ---
 

@@ -24,9 +24,11 @@ from curl_cffi.requests import RequestsError
 try:
     from config import KEYWORDS, MAX_ARTICLES_PER_SOURCE, SOURCES_RSS, TARGET_COMPANIES, USE_MEMORY, SCRAPE_LIMIT_MONTH, RECENT_DAYS_LIMIT, SOLO_KEYWORDS, RESEARCH_ORGS, CROSS_DOMAIN_TOPICS
     from io_utils import atomic_write_json
+    from auto_tuner import compute_max_results as _tuned_max_results, run_full_tuning as _auto_tuner_run
 except ImportError:
     from src.config import KEYWORDS, MAX_ARTICLES_PER_SOURCE, SOURCES_RSS, TARGET_COMPANIES, USE_MEMORY, SCRAPE_LIMIT_MONTH, RECENT_DAYS_LIMIT, SOLO_KEYWORDS, RESEARCH_ORGS, CROSS_DOMAIN_TOPICS
     from src.io_utils import atomic_write_json
+    from src.auto_tuner import compute_max_results as _tuned_max_results, run_full_tuning as _auto_tuner_run
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s — %(message)s")
 logger = logging.getLogger("scraper")
@@ -218,9 +220,15 @@ def _save_discovered_actors() -> None:
     for norm, session_entry in _discovered_actors_session.items():
         hist_entry = historical.get(norm)
         if hist_entry is None:
-            historical[norm] = session_entry.copy()
+            new_entry = session_entry.copy()
+            # appearances_runs : nombre de runs DISTINCTS ou l'acteur a ete vu.
+            # Independant de `count` (qui peut etre cumule par plusieurs hits dans un run).
+            # Sert au critere de stickiness de auto_tuner.auto_promote_actors_v2().
+            new_entry["appearances_runs"] = 1
+            historical[norm] = new_entry
         else:
             hist_entry["count"] = hist_entry.get("count", 0) + session_entry["count"]
+            hist_entry["appearances_runs"] = hist_entry.get("appearances_runs", 1) + 1
             hist_entry["last_seen"] = session_entry["last_seen"]
             for src in session_entry["sources"]:
                 if src not in hist_entry.get("sources", []):
@@ -1143,6 +1151,7 @@ def fetch_openalex_works(query: str, max_results: int = 25) -> list[dict[str, An
     """
     from datetime import timedelta
 
+    max_results = _tuned_max_results(query, "openalex", max_results)
     cutoff_date = (datetime.now(timezone.utc) - timedelta(days=RECENT_DAYS_LIMIT)).strftime("%Y-%m-%d")
     # Politesse OpenAlex : champ mailto pour identifier le client (recommandé, débit prioritaire)
     polite_email = os.environ.get("GMAIL_USER", "veille-tech@example.com")
@@ -1269,6 +1278,7 @@ def fetch_crossref_works(query: str, max_results: int = 20) -> list[dict[str, An
     une priorité d'accès supérieure au pool « public » non identifié.
     """
     from datetime import timedelta
+    max_results = _tuned_max_results(query, "crossref", max_results)
     cutoff_date = (datetime.now(timezone.utc) - timedelta(days=RECENT_DAYS_LIMIT)).strftime("%Y-%m-%d")
     polite_email = os.environ.get("GMAIL_USER", "veille-tech@example.com")
     # Crossref recommande explicitement un UA identifiant le client + mailto.
@@ -1372,6 +1382,7 @@ def build_hal_queries() -> list[str]:
 def fetch_hal_publications(query: str, max_results: int = 20) -> list[dict[str, Any]]:
     """Interroge l'API HAL Search (Solr-based, gratuite, sans clé)."""
     from datetime import timedelta
+    max_results = _tuned_max_results(query, "hal", max_results)
     cutoff_date = (datetime.now(timezone.utc) - timedelta(days=RECENT_DAYS_LIMIT)).strftime("%Y-%m-%d")
     params = {
         "q":    query,
@@ -1475,6 +1486,7 @@ def fetch_semantic_scholar(query: str, max_results: int = 20) -> list[dict[str, 
     scoring IA filtre ensuite la pertinence réelle.
     """
     from datetime import timedelta
+    max_results = _tuned_max_results(query, "semantic_scholar", max_results)
     # SS ne supporte pas un filtre date par jour — on borne par année (2 dernières)
     current_year = datetime.now(timezone.utc).year
     year_filter = f"{current_year - 1}-{current_year}"
@@ -1597,6 +1609,7 @@ def fetch_arxiv_search(query: str, max_results: int = 20) -> list[dict[str, Any]
         Retourne None si HTTP 429/403 -> permet au caller (run_scraper) de
         compter les blocages consécutifs et déclencher un circuit breaker.
     """
+    max_results = _tuned_max_results(query, "arxiv", max_results)
     url = (
         "https://export.arxiv.org/api/query"
         f"?search_query={quote_plus(query)}"
@@ -1688,6 +1701,7 @@ def fetch_broad_web_search(query: str, max_results: int = 10) -> list[dict[str, 
         Liste d'articles au format unifié du projet. Liste vide en cas d'erreur
         ou si TAVILY_API_KEY est absente (dégradation gracieuse).
     """
+    max_results = _tuned_max_results(query, "tavily", max_results)
     api_key = os.environ.get("TAVILY_API_KEY")
     if not api_key:
         logger.info("ℹ️ TAVILY_API_KEY absente — recherche Web Tavily désactivée pour cette requête.")
@@ -1810,6 +1824,7 @@ def fetch_google_patents(query: str, max_results: int = 15) -> list[dict[str, An
         Liste d'articles unifiés (catégorie 'patent'). Vide en cas d'erreur.
     """
     from datetime import timedelta
+    max_results = _tuned_max_results(query, "patents", max_results)
     cutoff_date = (datetime.now(timezone.utc) - timedelta(days=RECENT_DAYS_LIMIT)).strftime("%Y%m%d")
 
     # Querystring INTERNE (à URL-encoder dans le paramètre 'url=')
@@ -2443,16 +2458,18 @@ def run_scraper(
     # dans companies/research_orgs mais aperçus dans les resultats Patents/OpenAlex).
     _save_discovered_actors()
 
-    # Auto-promotion des acteurs recurrents : count cumule >= seuil → targets.json.
-    # Les futurs runs interrogeront ces acteurs comme des cibles connues.
-    try:
-        auto_promote_actors()
-    except Exception as e:
-        logger.warning(f"⚠️ Auto-promotion acteurs : echec non-bloquant : {e}")
-
     # Persistance des stats de requetes (cumul inter-runs) + resume Rich
     _save_query_stats()
     _print_query_stats_summary()
+
+    # Auto-tuning : ferme la boucle de feedback (promote v2 + purge cibles steriles
+    # + recalcule tiers Hot/Standard/Cold pour le prochain run). Ordre : APRES
+    # _save_query_stats() pour que le tuner voie les stats du run qui vient de finir.
+    # Voir src/auto_tuner.py pour la logique complete.
+    try:
+        _auto_tuner_run()
+    except Exception as e:
+        logger.warning(f"⚠️ Auto-tuning : echec non-bloquant : {e}")
 
     # Persistance des cookies inter-runs (anti-detection : un utilisateur reel
     # accumule des cookies sur les sites qu'il revisite chaque semaine).
