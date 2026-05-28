@@ -1879,23 +1879,251 @@ def fetch_google_patents(query: str, max_results: int = 15) -> list[dict[str, An
                 continue
             snippet  = (patent.get("snippet") or "").strip()[:600]
             assignee = (patent.get("assignee") or "").strip()
-            summary  = snippet
+            inventor = (patent.get("inventor") or "").strip()
+            # Date de priorite / publication (signal de fraicheur)
+            priority_date = (patent.get("priority_date") or "").strip()
+            pub_date      = (patent.get("publication_date") or patent.get("filing_date") or "").strip()
+            # Classification IPC/CPC (sous-domaine technique) — parfois disponible
+            cpc_list      = patent.get("cpc") or patent.get("ipc") or []
+            if isinstance(cpc_list, str):
+                cpc_list = [cpc_list]
+            cpc_short = ", ".join(c for c in cpc_list[:3] if c) if cpc_list else ""
+
+            # Construit un summary enrichi avec metadonnees structurees
+            meta_parts: list[str] = []
             if assignee:
-                summary = f"{snippet} [Déposant : {assignee}]" if snippet else f"Déposant : {assignee}"
+                meta_parts.append(f"Déposant : {assignee}")
+            if inventor:
+                meta_parts.append(f"Inventeur(s) : {inventor[:120]}")
+            if priority_date:
+                meta_parts.append(f"Priorité : {priority_date[:10]}")
+            if pub_date and pub_date[:10] != priority_date[:10]:
+                meta_parts.append(f"Publication : {pub_date[:10]}")
+            if cpc_short:
+                meta_parts.append(f"Classification : {cpc_short}")
+            meta_str = " · ".join(meta_parts)
+            summary  = f"{snippet}\n\n[{meta_str}]" if (snippet and meta_str) else (snippet or meta_str)
+
+            if assignee:
                 # Extraction acteurs : les deposants de brevets sont souvent des
                 # entreprises dans le domaine. Si non deja dans companies, on
                 # propose la decouverte a l'utilisateur via discovered_actors.json.
                 _record_actor(assignee, "patents")
             articles.append({
-                "title":        title,
-                "link":         f"https://patents.google.com/patent/{pub_num}/en",
-                "summary":      summary,
-                "source":       f"Google Patents — {assignee or pub_num}",
-                "category":     "patent",
-                "collected_at": datetime.now(timezone.utc).isoformat(),
+                "title":          title,
+                "link":           f"https://patents.google.com/patent/{pub_num}/en",
+                "summary":        summary,
+                "source":         f"Google Patents — {assignee or pub_num}",
+                "category":       "patent",
+                "collected_at":   datetime.now(timezone.utc).isoformat(),
+                # Metadonnees structurees enrichies (utilises par heatmap concurrentielle)
+                "patent_assignee":     assignee,
+                "patent_inventor":     inventor,
+                "patent_priority_date": priority_date[:10] if priority_date else "",
+                "patent_pub_date":     pub_date[:10] if pub_date else "",
+                "patent_cpc":          cpc_list[:5] if cpc_list else [],
+                "patent_pub_num":      pub_num,
             })
     logger.info(f"   └─ Google Patents : {len(articles)} brevet(s) pour « {query[:60]}... »")
     _record_query_stat(query, "patents", len(articles))
+    return articles
+
+
+# =============================================================================
+# Sources internationales (EuropePMC + BASE) — couverture geographique élargie
+# =============================================================================
+
+def build_europepmc_queries() -> list[str]:
+    """Construit les requetes EuropePMC sur les axes thématiques.
+
+    EuropePMC indexe ~40M papers PubMed + preprints + littérature européenne
+    (Wellcome, EMBL, INSERM, etc.). Complémentaire d'OpenAlex/Crossref :
+    capture les papers biomédicaux/matériaux financés UE/UK/CH.
+    """
+    if not KEYWORDS and not SOLO_KEYWORDS:
+        return []
+    base = [
+        '"physical vapor deposition"',
+        '"chemical vapor deposition"',
+        '"atomic layer deposition"',
+        '"magnetron sputtering"',
+        '"thin film coating"',
+    ]
+    kw_q    = [f'"{kw}"' for kw in (KEYWORDS or [])]
+    solo_q  = [f'"{kw}"' for kw in (SOLO_KEYWORDS or [])]
+    cross_q = [f'"{topic}"' for topic in (CROSS_DOMAIN_TOPICS or [])]
+    return list(dict.fromkeys(base + kw_q + solo_q + cross_q))
+
+
+def fetch_europepmc(query: str, max_results: int = 20) -> list[dict[str, Any]]:
+    """Interroge l'API EuropePMC (gratuite, sans clé, ~40M papers).
+
+    Complète OpenAlex/Crossref/HAL : indexe aussi PubMed Central, preprints
+    bioRxiv/medRxiv/chemRxiv, et la littérature financée UE. Bon pour
+    materiaux biomédicaux/biomim, batteries, semiconducteurs medicaux.
+    """
+    from datetime import timedelta
+    max_results = _tuned_max_results(query, "europepmc", max_results)
+    cutoff_date = (datetime.now(timezone.utc) - timedelta(days=RECENT_DAYS_LIMIT)).strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # Lucene-like : FIRST_PDATE filter cote serveur
+    full_query = f'{query} AND FIRST_PDATE:[{cutoff_date} TO {today}]'
+    params = {
+        "query":      full_query,
+        "format":     "json",
+        "pageSize":   max_results,
+        "sort":       "FIRST_PDATE desc",
+        "resultType": "lite",
+    }
+
+    _respect_domain_cooldown("https://www.ebi.ac.uk/europepmc/")
+    session = _get_session()
+    try:
+        response = session.get(
+            "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+            params=_shuffle_params(params),
+            headers=_api_headers(),
+            timeout=20,
+        )
+        if response.status_code in (403, 429):
+            _record_block("https://www.ebi.ac.uk/europepmc/", base_seconds=60.0)
+            logger.warning(f"🚫 EuropePMC : statut HTTP {response.status_code}")
+            return []
+        response.raise_for_status()
+        data = response.json()
+    except (RequestsError, OSError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning(f"❌ EuropePMC : erreur pour « {query[:60]}... » : {exc}")
+        return []
+
+    articles: list[dict[str, Any]] = []
+    for item in data.get("resultList", {}).get("result", []):
+        title = (item.get("title") or "").strip()
+        if not title:
+            continue
+        # Lien : DOI prioritaire (canonique), fallback PubMed/PMC
+        link = ""
+        if item.get("doi"):
+            link = f"https://doi.org/{item['doi']}"
+        elif item.get("pmcid"):
+            link = f"https://europepmc.org/article/PMC/{item['pmcid']}"
+        elif item.get("pmid"):
+            link = f"https://europepmc.org/article/MED/{item['pmid']}"
+        if not link:
+            continue
+
+        summary = (item.get("abstractText") or "")[:600]
+        venue = (item.get("journalTitle") or item.get("source") or "EuropePMC")[:80]
+
+        articles.append({
+            "title":        title,
+            "link":         link,
+            "summary":      summary,
+            "source":       f"EuropePMC — {venue}",
+            "category":     "science",
+            "collected_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+    logger.info(f"   └─ EuropePMC : {len(articles)} résultat(s) pour « {query[:60]}... »")
+    _record_query_stat(query, "europepmc", len(articles))
+    return articles
+
+
+def build_base_queries() -> list[str]:
+    """BASE accepte les memes requetes que OpenAlex (syntaxe Solr/Lucene)."""
+    if not KEYWORDS and not SOLO_KEYWORDS:
+        return []
+    base = [
+        '"physical vapor deposition"',
+        '"chemical vapor deposition"',
+        '"atomic layer deposition"',
+        '"magnetron sputtering"',
+        '"thin film coating"',
+    ]
+    kw_q    = [f'"{kw}"' for kw in (KEYWORDS or [])]
+    solo_q  = [f'"{kw}"' for kw in (SOLO_KEYWORDS or [])]
+    org_q   = [f'"{org}"' for org in (RESEARCH_ORGS or [])]
+    cross_q = [f'"{topic}"' for topic in (CROSS_DOMAIN_TOPICS or [])]
+    return list(dict.fromkeys(base + kw_q + solo_q + org_q + cross_q))
+
+
+def fetch_base(query: str, max_results: int = 20) -> list[dict[str, Any]]:
+    """Interroge BASE (Bielefeld Academic Search Engine, 400M docs, gratuit, sans cle).
+
+    Complémente parfaitement OpenAlex/EuropePMC : indexe 12000+ repositoires
+    institutionnels mondiaux (gros volume Asia / Allemagne / France / pays
+    moins couverts par les agregateurs commerciaux).
+
+    Note : BASE peut refuser certains IP (cloud, scrapers). On retourne [] et
+    on log info (non bloquant). Si tu vois "BASE acces refuse", c'est ton IP.
+    """
+    max_results = _tuned_max_results(query, "base", max_results)
+
+    params = {
+        "func":   "PerformSearch",
+        "query":  query,
+        "hits":   max_results,
+        "format": "json",
+    }
+
+    _respect_domain_cooldown("https://api.base-search.net/")
+    session = _get_session()
+    try:
+        response = session.get(
+            "https://api.base-search.net/cgi-bin/BaseHttpSearchInterface.fcgi",
+            params=_shuffle_params(params),
+            headers=_api_headers(),
+            timeout=20,
+        )
+        if response.status_code == 403:
+            # Acces denial structurel (IP scraping). Log info, pas warning, pas cooldown.
+            logger.info(f"ℹ️ BASE : HTTP 403 (IP probablement bloquee), skip cette requete.")
+            return []
+        if response.status_code == 429:
+            _record_block("https://api.base-search.net/", base_seconds=120.0)
+            return []
+        response.raise_for_status()
+        data = response.json()
+    except (RequestsError, OSError, ValueError, json.JSONDecodeError) as exc:
+        logger.info(f"ℹ️ BASE : erreur ({exc}), skip pour cette requete.")
+        return []
+
+    articles: list[dict[str, Any]] = []
+    docs = data.get("response", {}).get("docs", []) if isinstance(data, dict) else []
+    for doc in docs:
+        # BASE retourne des champs Dublin Core (dctitle, dcdescription, dclink, ...)
+        title = (doc.get("dctitle") or "").strip()
+        if not title:
+            continue
+        # dclink peut etre string ou liste
+        dclink = doc.get("dclink")
+        link = dclink[0] if isinstance(dclink, list) and dclink else (dclink or "")
+        if not isinstance(link, str) or not link:
+            continue
+
+        desc = doc.get("dcdescription")
+        summary = ""
+        if isinstance(desc, list) and desc:
+            summary = str(desc[0])[:600]
+        elif isinstance(desc, str):
+            summary = desc[:600]
+
+        source_name = doc.get("dcsource") or doc.get("dcrepository") or "BASE"
+        if isinstance(source_name, list):
+            source_name = source_name[0] if source_name else "BASE"
+
+        articles.append({
+            "title":        title,
+            "link":         link,
+            "summary":      summary,
+            "source":       f"BASE — {str(source_name)[:60]}",
+            "category":     "science",
+            "collected_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+    if articles:
+        logger.info(f"   └─ BASE : {len(articles)} résultat(s) pour « {query[:60]}... »")
+    _record_query_stat(query, "base", len(articles))
     return articles
 
 
@@ -2107,6 +2335,10 @@ def _run_scientific_sources_parallel(
         sources_config.append(("HAL", "🇫🇷", fetch_hal_publications, build_hal_queries, 5.0, 10.0, 3.0))
     if enabled.get("s2"):
         sources_config.append(("SemanticScholar", "🧠", fetch_semantic_scholar, build_semantic_scholar_queries, 8.0, 12.0, 3.0))
+    if enabled.get("europepmc"):
+        sources_config.append(("EuropePMC", "🇪🇺", fetch_europepmc, build_europepmc_queries, 5.0, 10.0, 3.0))
+    if enabled.get("base"):
+        sources_config.append(("BASE", "🌍", fetch_base, build_base_queries, 6.0, 12.0, 4.0))
 
     if not sources_config:
         return [], []
@@ -2146,6 +2378,8 @@ def run_scraper(
     include_crossref:          bool = True,    # ON : gratuit, sans clé, ~140M papers
     include_hal:               bool = True,    # ON : gratuit, sans clé, fort sur sources FR (CEA/CNRS/ONERA)
     include_semantic_scholar:  bool = True,    # ON : gratuit (rate-limit 1 r/s sans clé), ~200M papers
+    include_europepmc:         bool = True,    # ON : gratuit, sans clé, ~40M papers (PubMed+preprints UE)
+    include_base:              bool = True,    # ON : gratuit, 400M docs internationaux (peut bloquer certaines IP)
     include_web:               bool = False,   # OFF : nécessite TAVILY_API_KEY
     include_patents:           bool = True,    # ON : gratuit, sans clé, brevets industriels PVD/CVD/ALD
     apply_filter:              bool = True,
@@ -2223,13 +2457,15 @@ def run_scraper(
     # Sinon, mode sequentiel historique (utile si l'utilisateur veut un trace
     # ordonne ou troubleshooter une source en particulier).
     # =========================================================================
-    if SCRAPE_PARALLEL_SCIENTIFIC and (include_openalex or include_crossref or include_hal or include_semantic_scholar):
+    if SCRAPE_PARALLEL_SCIENTIFIC and (include_openalex or include_crossref or include_hal or include_semantic_scholar or include_europepmc or include_base):
         _maybe_inter_source_pause("Sources_Parallel")
         parallel_articles, parallel_blocks = _run_scientific_sources_parallel({
-            "openalex": include_openalex,
-            "crossref": include_crossref,
-            "hal":      include_hal,
-            "s2":       include_semantic_scholar,
+            "openalex":  include_openalex,
+            "crossref":  include_crossref,
+            "hal":       include_hal,
+            "s2":        include_semantic_scholar,
+            "europepmc": include_europepmc,
+            "base":      include_base,
         })
         all_articles.extend(parallel_articles)
         _executed_blocks.extend(parallel_blocks)

@@ -2,9 +2,9 @@
 
 Système de veille stratégique industrielle pour le suivi de concurrents, d'innovations en revêtements de surface (PVD / CVD / ALD / sputtering / DLC) **et de découvertes transférables** depuis d'autres domaines (photonique, MEMS, biomim, nanotech, IA process, métamatériaux).
 
-Le pipeline collecte des articles depuis **9 sources** scientifiques et de presse, les filtre via une cascade de modèles Gemini (~38 niveaux de fallback dynamiques) selon une **logique d'innovation transférable cross-domaine**, découvre automatiquement les nouveaux acteurs (entreprises et labos), et envoie un digest HTML hebdomadaire scoré 1-5 par email.
+Le pipeline collecte des articles depuis **11 sources** scientifiques et de presse, les filtre via une cascade de modèles Gemini (~38 niveaux de fallback dynamiques) selon une **logique d'innovation transférable cross-domaine**, découvre automatiquement les nouveaux acteurs (entreprises et labos), et envoie un digest HTML hebdomadaire scoré 1-5 par email.
 
-## Sources de collecte (9 sources)
+## Sources de collecte (11 sources)
 
 | Source | Volume typique | Authentification |
 |---|---|---|
@@ -14,8 +14,10 @@ Le pipeline collecte des articles depuis **9 sources** scientifiques et de press
 | Crossref (~112 requêtes) | ~150 articles | aucune (mailto poli) |
 | HAL CNRS (~112 requêtes bilingues FR/EN) | ~50 articles | aucune |
 | Semantic Scholar (~111 requêtes) | ~30 articles | clé optionnelle |
+| **🆕 EuropePMC** (~110 requêtes, PubMed + preprints) | ~100 articles | aucune |
+| **🆕 BASE Bielefeld** (~110 requêtes, 400M docs international) | ~80 articles | aucune |
 | Tavily Web Search (~110 requêtes) | ~40 articles | clé optionnelle (1000 req/mois) |
-| **🆕 Google Patents** (~112 requêtes, extraction assignees) | ~100 brevets | aucune |
+| **Google Patents** (~112 requêtes, métadonnées enrichies CPC/IPC/inventeurs) | ~100 brevets | aucune |
 | Google News RSS (~589 requêtes furtives, mode weekend) | ~1500+ articles | aucune |
 
 ## Fonctionnalités phares
@@ -34,6 +36,16 @@ Le pipeline collecte des articles depuis **9 sources** scientifiques et de press
   - **Multi-judge ciblé** sur articles ≥4★ ou confidence <0.5 (consensus 2 modèles, fusion max/avg selon contexte concurrent)
   - **MMR diversification** post-scoring (évite la redondance sujet dans le top de l'email)
   - **Calibration drift inter-runs** : alerte automatique si dérive Gemini (over/under-scoring)
+- **👍👎 Feedback loop utilisateur** : boutons mailto dans chaque article du digest → IMAP poll au prochain run → injection few-shot dans le prompt système (l'IA apprend de tes retours, voir `src/feedback.py`)
+- **♻️ Déduplication sémantique** : élimine les doublons preprint/published, même paper dans OpenAlex+Crossref (TF-IDF cosine seuil 0.85)
+- **🌍 Sources internationales** : EuropePMC (40M papers PubMed+preprints UE) + BASE (400M docs Asia/Europe) en plus des 7 sources scientifiques
+- **📊 Heatmap concurrentielle** : section dédiée dans le digest avec anomalies d'activité ("Aixtron ×3 mentions vs moyenne") détectées sur 8 runs
+- **🌱 Détection de topics émergents** : TF-IDF n-grams sur articles top-scored, suggère automatiquement de nouveaux `cross_domain_topics` à ajouter
+- **📝 Versioning des prompts** : chaque article scoré porte `scoring_prompt_version` (hash SHA1[:8]) pour audit rétroactif
+- **👤 Profils utilisateur** : personnalisation par destinataire via `data/user_profiles.json` (boost/penalty keywords, min_score override)
+- **🌐 Traduction optionnelle EN→FR** : résumés des top articles traduits via Gemini batch si `TRANSLATION_ENABLED=true`
+- **📊 Dashboard local Streamlit** : `streamlit run dashboard.py` pour explorer archive, tendances scores, calibration drift, acteurs découverts
+- **✅ Suite de tests pytest** (77 tests) + workflow GitHub Actions CI
 - **🌐 Proxy résidentiel optionnel** : pool 1-3 proxies + health check + failover + auto-recovery (provider recommandé : Decodo)
 - **🔒 Anti-détection 20+ couches** : TLS Chrome impersonation, locales rotatives, délais humains, pause circadienne, pre-flight arXiv, circuit breakers, **soft-ban detection (CAPTCHA/Cloudflare)**, **headers contextuels** (Sec-Fetch adaptatif API vs RSS), **params shufflés**, **cookies persistents inter-runs**, Accept-Encoding gzip+deflate+br
 - **⚡ Parallélisation inter-sources** : OpenAlex + Crossref + HAL + Semantic Scholar en 4 threads simultanés (gain -60 min/run)
@@ -82,6 +94,8 @@ python send_recap.py "alice@x.com,bob@y.com"         # Renvoyer l'archive cumula
 python send_recap.py "user@x.com" --dry-run          # Générer un preview HTML local
 python -m src.proxy_manager                          # Tester les proxies résidentiels
 python check.py                                      # Lister les modèles Gemini accessibles
+streamlit run dashboard.py                           # Dashboard local pour explorer archive + tendances
+python -m pytest tests/                              # Suite de tests (77 tests, <3s)
 ```
 
 ## Stack technique

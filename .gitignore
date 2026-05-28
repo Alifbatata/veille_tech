@@ -34,10 +34,18 @@ data/seen_urls.json
 data/recap_preview.html
 data/test_preview.html
 data/_backup_*/
+data/backups/
 data/proxy_bandwidth.json
 data/discovered_actors.json
 data/query_stats.json
 data/cookies.jar
+data/archived_targets.json
+data/score_calibration.json
+data/competitor_history.json
+data/feedback_history.json
+data/emerging_topics.json
+data/prompt_versions.json
+data/user_profiles.json
 
 # =============================================================================
 # Exports PDF (regenerables depuis les .md - pas a commiter)

@@ -27,6 +27,16 @@ from email.mime.text import MIMEText
 from html import escape
 from typing import Any
 
+try:
+    from feedback import make_mailto_link, FEEDBACK_ENABLED
+except ImportError:
+    try:
+        from src.feedback import make_mailto_link, FEEDBACK_ENABLED
+    except ImportError:
+        # Mode degrade : si feedback.py absent, le bouton sera silencieusement omis
+        make_mailto_link = lambda *args, **kwargs: ""  # type: ignore
+        FEEDBACK_ENABLED = False
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -216,6 +226,77 @@ def _load_top_discovered_actors(min_count: int = 2, max_actors: int = 15) -> lis
     return actors[:max_actors]
 
 
+def _render_competitor_heatmap_section(heatmap: dict[str, Any]) -> str:
+    """Genere la section heatmap concurrentielle (anomalies + top actifs).
+
+    Affichee juste apres le TLDR pour visibilite max. Retourne "" si pas de donnees
+    interessantes (premier run, ou aucun concurrent mentionne).
+    """
+    if not heatmap:
+        return ""
+    anomalies = heatmap.get("anomalies", []) or []
+    top_active = heatmap.get("top_active", []) or []
+    if not anomalies and not top_active:
+        return ""
+
+    rows_html = ""
+    if anomalies:
+        rows_html += '<p style="margin:0 0 12px;font-weight:700;color:#1c2b36;">📊 Anomalies detectees ce run</p>'
+        for a in anomalies[:5]:
+            name = escape(str(a.get("name", "?")))
+            cur = a.get("current", 0)
+            avg = a.get("avg", 0)
+            ratio = a.get("ratio", 1.0)
+            direction = a.get("direction", "up")
+            patents = a.get("patents", 0)
+            others = a.get("others", 0)
+            arrow = "📈" if direction == "up" else "📉"
+            color = "#059669" if direction == "up" else "#dc2626"
+            breakdown = []
+            if patents:
+                breakdown.append(f"{patents} brevet(s)")
+            if others:
+                breakdown.append(f"{others} article(s)")
+            breakdown_str = " · ".join(breakdown) if breakdown else f"{cur} mention(s)"
+            rows_html += (
+                f'<div style="padding:8px 12px;background:#fafafa;border-left:3px solid {color};margin-bottom:6px;">'
+                f'<span style="font-size:14px;font-weight:700;">{arrow} {name}</span> '
+                f'<span style="color:{color};font-weight:700;font-size:13px;">×{ratio}</span>'
+                f'<br><span style="font-size:12px;color:#666;">{breakdown_str} '
+                f'(moyenne {avg} sur runs precedents)</span>'
+                f'</div>'
+            )
+
+    if top_active and not anomalies:
+        # Si pas d'anomalies, on affiche au moins le top 5 actifs
+        rows_html += '<p style="margin:0 0 12px;font-weight:700;color:#1c2b36;">📊 Top concurrents actifs ce run</p>'
+        for name, count in top_active[:5]:
+            rows_html += (
+                f'<div style="padding:6px 12px;background:#fafafa;margin-bottom:4px;">'
+                f'<span style="font-weight:600;">{escape(str(name))}</span> '
+                f'<span style="color:#666;font-size:12px;">{count} mention(s)</span>'
+                f'</div>'
+            )
+
+    return f"""
+    <tr>
+      <td style="padding:8px 0 16px;">
+        <table role="presentation" cellpadding="0" cellspacing="0"
+               style="width:100%;background:#ffffff;border:1px solid #e5e5e5;border-radius:4px;">
+          <tr>
+            <td style="padding:18px 24px;">
+              <p style="margin:0 0 12px;font-size:11px;font-weight:700;
+                        letter-spacing:.12em;text-transform:uppercase;color:#4a6070;">
+                Surveillance concurrentielle
+              </p>
+              {rows_html}
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>"""
+
+
 def _render_discovered_actors_section(actors: list[dict[str, Any]]) -> str:
     """Génère la section 'Acteurs découverts' du digest email.
 
@@ -297,6 +378,36 @@ def _load_previous_top_articles() -> list[dict[str, Any]]:
 # Template HTML — style Swiss Industrial
 # ---------------------------------------------------------------------------
 
+def _render_feedback_buttons(article: dict[str, Any]) -> str:
+    """Genere les 2 boutons mailto: 👍/👎 sous chaque article.
+
+    Si FEEDBACK_ENABLED=false ou pas de destinataire configure : retourne "".
+    Les boutons ouvrent le client mail de l'utilisateur avec un email pre-rempli
+    vers GMAIL_USER. La boucle est fermee par feedback.poll_imap_feedback() au
+    prochain run de main.py.
+    """
+    if not FEEDBACK_ENABLED:
+        return ""
+    up_link = make_mailto_link(article, "up")
+    down_link = make_mailto_link(article, "down")
+    if not up_link or not down_link:
+        return ""
+    return (
+        f'<a href="{up_link}" '
+        f'style="display:inline-block;font-size:14px;text-decoration:none;'
+        f'color:#059669;padding:6px 8px;margin-right:4px;'
+        f'border:1px solid #d1fae5;border-radius:3px;" '
+        f'title="Pertinent — sera utilise pour calibrer l\'IA">'
+        f'👍</a>'
+        f'<a href="{down_link}" '
+        f'style="display:inline-block;font-size:14px;text-decoration:none;'
+        f'color:#dc2626;padding:6px 8px;margin-right:8px;'
+        f'border:1px solid #fee2e2;border-radius:3px;" '
+        f'title="Pas pertinent — sera utilise pour calibrer l\'IA">'
+        f'👎</a>'
+    )
+
+
 def _render_article_card(article: dict[str, Any], index: int) -> str:
     """Génère le HTML d'une carte article."""
     score       = article.get("score", 1)
@@ -361,6 +472,7 @@ def _render_article_card(article: dict[str, Any], index: int) -> str:
                     {'<span style="color:#c5d0d8;margin-left:6px;">· ' + collected + '</span>' if collected else ''}
                   </td>
                   <td style="text-align:right;">
+                    {_render_feedback_buttons(article)}
                     <a href="{escape(link)}" class="read-source-link"
                        style="display:inline-block;font-size:10px;font-weight:700;
                               color:#1c2b36;text-decoration:none;
@@ -568,6 +680,10 @@ def build_html_email(filtered_data: dict[str, Any]) -> str:
 
     discovered_actors = _load_top_discovered_actors(min_count=2, max_actors=15)
     discovered_section_html = _render_discovered_actors_section(discovered_actors)
+
+    # Heatmap concurrentielle (anomalies + top actifs) si dispo dans meta
+    competitor_heatmap = meta.get("scoring_v2", {}).get("competitor_heatmap", {})
+    competitor_section_html = _render_competitor_heatmap_section(competitor_heatmap)
 
     return f"""<!DOCTYPE html>
 <html lang="fr">
@@ -779,6 +895,7 @@ def build_html_email(filtered_data: dict[str, Any]) -> str:
               <table role="presentation" cellpadding="0" cellspacing="0"
                      style="width:100%;">
                 {tldr_html}
+                {competitor_section_html}
                 {body_sections}
                 {empty_state}
                 {discovered_section_html}

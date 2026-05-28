@@ -405,8 +405,32 @@ Action 11 et 12 du menu CLI restent disponibles pour la revue/inspection manuell
 | `AUTO_EXPAND_COLD_CONSECUTIVE_ZEROS` | 3 | Seuil consécutifs à 0 pour passer Cold |
 | **`PROXY_COUNTRY`** | `CH` | Code pays geo-targeting (laisser vide en trial Decodo gratuit) |
 | **`PROXY_BANDWIDTH_CAP_MB`** | 0 | Plafond bande passante en MB (0 = pas de cap). Recommandé 80 pour trial 100 MB |
-| **`SCRAPE_PARALLEL_SCIENTIFIC`** | `true` | Lance OpenAlex/Crossref/HAL/S2 en parallèle (4 threads). Gain ~60 min sur run complet |
+| **`SCRAPE_PARALLEL_SCIENTIFIC`** | `true` | Lance OpenAlex/Crossref/HAL/S2/EuropePMC/BASE en parallèle. Gain ~60 min/run |
 | **`SCRAPE_PARALLEL_MAX_WORKERS`** | 5 | Nb max de threads workers (1 par source) |
+| `DEDUP_ENABLED` | `true` | Déduplication sémantique TF-IDF avant Gemini |
+| `DEDUP_THRESHOLD` | `0.85` | Similarité cosine min pour considérer comme doublon |
+| `PRERANK_ENABLED` | `true` | Pre-ranking BM25 avant Gemini (-15-30% tokens) |
+| `PRERANK_KEEP_TOP_FRACTION` | `0.80` | Fraction minimale du flux préservée |
+| `PRERANK_MIN_BM25_NORMALIZED` | `0.05` | Seuil normalisé pour couper la queue |
+| `MMR_ENABLED` | `true` | Diversification MMR du top |
+| `MMR_LAMBDA` | `0.7` | 1.0 = pure relevance, 0.0 = pure diversité |
+| `MMR_TOP_K` | `60` | Nombre d'articles affectés par MMR |
+| `MULTI_JUDGE_ENABLED` | `true` | Re-scoring 2e modèle sur top-tier/low-confidence |
+| `MULTI_JUDGE_TRIGGER_SCORE` | `4` | Score ≥ déclenche multi-judge |
+| `MULTI_JUDGE_TRIGGER_CONFIDENCE` | `0.5` | Confidence < déclenche multi-judge |
+| `MULTI_JUDGE_MAX_CANDIDATES` | `50` | Cap articles re-scorés/run |
+| `CALIBRATION_TRACK_ENABLED` | `true` | Track distribution scores inter-runs (drift) |
+| `FEEDBACK_ENABLED` | `true` | Boutons 👍/👎 dans email + IMAP poll |
+| `FEEDBACK_POLL_IMAP` | `true` | Lit l'inbox Gmail au démarrage |
+| `FEEDBACK_FEW_SHOT_COUNT` | `3` | Nb d'exemples 👍/👎 injectés dans le prompt |
+| `HEATMAP_ENABLED` | `true` | Section heatmap concurrentielle dans le digest |
+| `HEATMAP_ANOMALY_RATIO` | `2.0` | Ratio current/avg pour déclencher alerte |
+| `HEATMAP_MIN_MENTIONS` | `2` | Mentions absolues minimales pour anomalie |
+| `EMERGENCE_ENABLED` | `true` | Détection auto de nouveaux topics émergents |
+| `EMERGENCE_MIN_SCORE` | `4` | Score min des articles utilisés pour TF-IDF n-grams |
+| `EMERGENCE_TOP_N` | `10` | Nombre max de topics suggérés/run |
+| `TRANSLATION_ENABLED` | `false` | Traduction EN→FR des résumés top (coût Gemini +1 req) |
+| `TRANSLATION_TARGET_LANG` | `fr` | Langue cible (fr, de, it...) |
 
 ---
 

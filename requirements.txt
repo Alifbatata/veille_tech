@@ -15,3 +15,6 @@ numpy>=1.26.0
 # Active uniquement si tu set ST_OPTIONAL_ENABLED=true dans .env.
 # Pas necessaire pour la qualite par defaut (TF-IDF suffit largement).
 # sentence-transformers>=2.7.0
+
+# Optionnel : dashboard.py (interface web locale). Lancement : streamlit run dashboard.py
+# streamlit>=1.30.0

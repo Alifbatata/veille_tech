@@ -267,6 +267,12 @@ try:
         pre_rank_articles as _v2_pre_rank_articles,
         apply_v2_pipeline as _v2_apply_pipeline,
     )
+    from feedback import build_few_shot_prompt_section as _feedback_few_shot
+    from dedup import deduplicate_semantically as _dedup_semantically
+    from prompt_version import compute_prompt_version, register_prompt
+    from competitor_heatmap import compute_heatmap as _compute_competitor_heatmap
+    from topic_emergence import detect_emerging_topics as _detect_emerging_topics
+    from topic_emergence import persist_emerging_topics as _persist_emerging_topics
 except ImportError:
     from src.config import TARGET_COMPANIES, KEYWORDS, SOLO_KEYWORDS, RESEARCH_ORGS, CROSS_DOMAIN_TOPICS
     from src.scoring_v2 import (
@@ -274,6 +280,12 @@ except ImportError:
         pre_rank_articles as _v2_pre_rank_articles,
         apply_v2_pipeline as _v2_apply_pipeline,
     )
+    from src.feedback import build_few_shot_prompt_section as _feedback_few_shot
+    from src.dedup import deduplicate_semantically as _dedup_semantically
+    from src.prompt_version import compute_prompt_version, register_prompt
+    from src.competitor_heatmap import compute_heatmap as _compute_competitor_heatmap
+    from src.topic_emergence import detect_emerging_topics as _detect_emerging_topics
+    from src.topic_emergence import persist_emerging_topics as _persist_emerging_topics
 
 # ---------------------------------------------------------------------------
 # Prompt système — focus innovation transférable PVD/ALD (cross-domaine)
@@ -407,7 +419,27 @@ Réponds UNIQUEMENT avec un objet JSON valide respectant STRICTEMENT ce format e
 }}"""
 
 
-SYSTEM_PROMPT: str = _build_system_prompt(TARGET_COMPANIES)
+def _build_system_prompt_with_feedback(companies: list[str]) -> str:
+    """Wrapper qui combine le prompt G-Eval avec la section few-shot feedback.
+
+    Construit a chaque appel pour refleter les feedbacks user les plus recents
+    (le few-shot evolue inter-runs si l'utilisateur clique 👍/👎 dans le digest).
+    """
+    base = _build_system_prompt(companies)
+    try:
+        few_shot = _feedback_few_shot()
+    except (OSError, ValueError):
+        few_shot = ""
+    if few_shot:
+        return base + "\n\n" + few_shot
+    return base
+
+
+SYSTEM_PROMPT: str = _build_system_prompt_with_feedback(TARGET_COMPANIES)
+# Version courte du prompt courant (sha1[:8]) pour tracabilite dans articles_archive.
+SYSTEM_PROMPT_VERSION: str = compute_prompt_version(SYSTEM_PROMPT)
+# Enregistrement dans data/prompt_versions.json si premiere fois qu'on voit ce prompt.
+register_prompt(SYSTEM_PROMPT, label="ai_filter.SYSTEM_PROMPT")
 
 # ---------------------------------------------------------------------------
 # Initialisation du client Gemini
@@ -1468,6 +1500,18 @@ def filter_articles_with_ai(
 
     input_count = len(articles)
 
+    # ── Dedup semantique TF-IDF : elimine les doublons inter-sources ────────
+    # Capture les cas que dedup URL ne voit pas : preprint arXiv + version
+    # publiee, communique repris par plusieurs medias, meme paper OpenAlex+Crossref.
+    articles, dedup_removed = _dedup_semantically(articles)
+    if dedup_removed > 0:
+        pct = 100 * dedup_removed / input_count
+        logger.info(
+            "♻️ Dedup semantique : %d doublon(s) elimine(s) avant pre-filtre "
+            "(%.1f%% des bruts)",
+            dedup_removed, pct,
+        )
+
     # ── Pre-filtrage Python : economise des tokens Gemini ───────────────────
     # Rejette les articles qui n'ont AUCUN match avec targets/keywords. Cf.
     # _prefilter_articles : gain typique 15-30% des articles bruts.
@@ -1558,6 +1602,9 @@ def filter_articles_with_ai(
                 "confidence":    float(entry.get("confidence", 0.8)),
                 "justification": entry.get("justification", ""),
                 "tags":          list(dict.fromkeys(entry.get("tags", []))),
+                # Tracabilite : version du prompt utilise pour ce score
+                "scoring_prompt_version": SYSTEM_PROMPT_VERSION,
+                "scoring_model":          _active_model_name,
                 # Données originales de l'article
                 "title":         original.get("title", ""),
                 "link":          original.get("link", ""),
@@ -1588,6 +1635,28 @@ def filter_articles_with_ai(
     all_retained, v2_meta = _v2_apply_pipeline(all_retained)
     v2_meta["multi_judge"] = multi_judge_meta
 
+    # ── Heatmap concurrentielle : detecte les anomalies d'activite inter-runs ─
+    # "Aixtron a triple son volume de mentions ce run" est plus actionnable
+    # que "Aixtron est mentionne 3 fois". Persiste l'historique pour comparaison.
+    try:
+        competitor_heatmap = _compute_competitor_heatmap(all_retained, TARGET_COMPANIES)
+    except (OSError, ValueError, KeyError) as e:
+        logger.warning(f"⚠️ Heatmap concurrentielle : echec non-bloquant ({e})")
+        competitor_heatmap = {"current_run": {}, "anomalies": [], "top_active": []}
+    v2_meta["competitor_heatmap"] = competitor_heatmap
+
+    # ── Topics emergents : suggere des cross_domain_topics non-listes mais frequents ─
+    # Detecte par TF-IDF sur les articles top-scored. Persiste pour l'utilisateur.
+    try:
+        emerging = _detect_emerging_topics(
+            all_retained, TARGET_COMPANIES, KEYWORDS, SOLO_KEYWORDS, RESEARCH_ORGS, CROSS_DOMAIN_TOPICS,
+        )
+        _persist_emerging_topics(emerging)
+    except (OSError, ValueError, KeyError) as e:
+        logger.warning(f"⚠️ Topic emergence : echec non-bloquant ({e})")
+        emerging = []
+    v2_meta["emerging_topics"] = emerging
+
     # ── Génération du résumé exécutif global via un appel Gemini dédié ──────
     # Cette synthèse remplace la simple concaténation des tldrs par batch :
     # elle dispose d'une vue complète de la sélection finale et produit
@@ -1602,9 +1671,10 @@ def filter_articles_with_ai(
             "model":            _active_model_name,
             "input_count":      input_count,
             "retained_count":   len(all_retained),
-            "rejected_count":   total_rejected + prefilter_rejected + prerank_rejected,
+            "rejected_count":   total_rejected + prefilter_rejected + prerank_rejected + dedup_removed,
             "prefilter_rejected": prefilter_rejected,
             "prerank_rejected": prerank_rejected,
+            "dedup_removed":    dedup_removed,
             "batch_count":      len(batches),
             "min_score_filter": min_score,
             "tldr":             executive_summary,

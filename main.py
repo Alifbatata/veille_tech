@@ -18,6 +18,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 from dotenv import load_dotenv
 load_dotenv()
 
+# Poll feedback IMAP AVANT l'import d'ai_filter : le prompt systeme inclut les
+# few-shot examples bases sur data/feedback_history.json, donc on doit avoir
+# les feedbacks les plus recents AVANT que SYSTEM_PROMPT soit construit.
+# Fail-safe : si IMAP echoue, le pipeline continue avec le feedback_history existant.
+try:
+    from src.feedback import poll_imap_feedback as _poll_imap_feedback
+    _poll_imap_feedback()
+except Exception:
+    pass  # Boucle de feedback est optionnelle, jamais bloquante
+
 # Import des fonctions principales des modules
 from src.scraper import run_scraper
 from src.ai_filter import filter_articles_with_ai, GeminiUnavailableError
