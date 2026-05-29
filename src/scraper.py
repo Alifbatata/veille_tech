@@ -62,7 +62,11 @@ _thread_local_session = threading.local()
 # Verrou pour proteger les ecritures sur les dicts globaux (cooldown,
 # discovered_actors, query_stats) en mode parallele.
 _globals_lock = threading.Lock()
-_SEEN_URLS_MAX: int = 10000
+# Capacite memoire FIFO des URLs deja envoyees. Default 1M = pratiquement illimite
+# pour nos volumes (1500-2000 articles/run × 52 runs/an = ~100k URLs/an), tout en
+# protegeant la RAM (1M URLs × ~100 bytes = ~100 MB JSON file max).
+# Configurable via SEEN_URLS_MAX env var pour les cas extremes (mettre 0 = illimite).
+_SEEN_URLS_MAX: int = int(os.environ.get("SEEN_URLS_MAX", "1000000"))
 _SEEN_URLS_PATH = os.path.join(os.path.dirname(__file__), "../data/seen_urls.json")
 _CHECKPOINT_PATH = os.path.join(os.path.dirname(__file__), "../data/scraper_checkpoint.json")
 _CHECKPOINT_EVERY: int = 5  # Sauvegarde tous les N appels GNews
@@ -1016,7 +1020,11 @@ def load_seen_urls() -> list[str]:
 
 def save_seen_urls(seen_list: list[str]) -> None:
     try:
-        urls_to_save = seen_list[-_SEEN_URLS_MAX:]
+        # SEEN_URLS_MAX=0 → garde tout (illimite)
+        if _SEEN_URLS_MAX > 0:
+            urls_to_save = seen_list[-_SEEN_URLS_MAX:]
+        else:
+            urls_to_save = seen_list
         atomic_write_json(_SEEN_URLS_PATH, urls_to_save)
     except OSError as e:
         logger.error(f"Erreur de sauvegarde history : {e}")
