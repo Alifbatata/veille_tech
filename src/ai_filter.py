@@ -273,6 +273,8 @@ try:
     from competitor_heatmap import compute_heatmap as _compute_competitor_heatmap
     from topic_emergence import detect_emerging_topics as _detect_emerging_topics
     from topic_emergence import persist_emerging_topics as _persist_emerging_topics
+    from epo_enrichment import enrich_patents as _enrich_patents_epo
+    from epo_enrichment import EPO_ENRICHMENT_ENABLED as _EPO_ENABLED
 except ImportError:
     from src.config import TARGET_COMPANIES, KEYWORDS, SOLO_KEYWORDS, RESEARCH_ORGS, CROSS_DOMAIN_TOPICS
     from src.scoring_v2 import (
@@ -286,6 +288,8 @@ except ImportError:
     from src.competitor_heatmap import compute_heatmap as _compute_competitor_heatmap
     from src.topic_emergence import detect_emerging_topics as _detect_emerging_topics
     from src.topic_emergence import persist_emerging_topics as _persist_emerging_topics
+    from src.epo_enrichment import enrich_patents as _enrich_patents_epo
+    from src.epo_enrichment import EPO_ENRICHMENT_ENABLED as _EPO_ENABLED
 
 # ---------------------------------------------------------------------------
 # Prompt système — focus innovation transférable PVD/ALD (cross-domaine)
@@ -1656,6 +1660,16 @@ def filter_articles_with_ai(
         logger.warning(f"⚠️ Topic emergence : echec non-bloquant ({e})")
         emerging = []
     v2_meta["emerging_topics"] = emerging
+
+    # ── EPO OPS : enrichit les top brevets avec citations forward + family ──
+    # Necessite EPO_CONSUMER_KEY+SECRET (free tier https://developers.epo.org).
+    # Si non configure : no-op silencieux. Cap EPO_MAX_ENRICHED_PER_RUN (20).
+    if _EPO_ENABLED:
+        try:
+            n_enriched = _enrich_patents_epo(all_retained)
+            v2_meta["epo_enriched_count"] = n_enriched
+        except (OSError, ValueError, KeyError) as e:
+            logger.warning(f"⚠️ EPO enrichment : echec non-bloquant ({e})")
 
     # ── Génération du résumé exécutif global via un appel Gemini dédié ──────
     # Cette synthèse remplace la simple concaténation des tldrs par batch :

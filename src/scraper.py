@@ -2127,6 +2127,172 @@ def fetch_base(query: str, max_results: int = 20) -> list[dict[str, Any]]:
     return articles
 
 
+# =============================================================================
+# OpenAIRE — 240M publications financees par l'UE (sans inscription)
+# =============================================================================
+
+def build_openaire_queries() -> list[str]:
+    """Construit les requetes OpenAIRE sur les axes thématiques.
+
+    OpenAIRE indexe ~240M publications, donnees, software financees par les
+    programmes de recherche EU (Horizon, FP7, ERC, etc.). Complementaire :
+    capture les outputs finances UE pas toujours bien indexes par OpenAlex
+    (deliverables, working papers, theses, datasets).
+    """
+    if not KEYWORDS and not SOLO_KEYWORDS:
+        return []
+    base = [
+        "physical vapor deposition",
+        "chemical vapor deposition",
+        "atomic layer deposition",
+        "magnetron sputtering",
+        "thin film coating",
+    ]
+    kw_q    = list(KEYWORDS or [])
+    solo_q  = list(SOLO_KEYWORDS or [])
+    cross_q = list(CROSS_DOMAIN_TOPICS or [])
+    return list(dict.fromkeys(base + kw_q + solo_q + cross_q))
+
+
+def fetch_openaire(query: str, max_results: int = 20) -> list[dict[str, Any]]:
+    """Interroge l'API OpenAIRE Search (gratuit, sans cle, sans inscription).
+
+    Documentation : https://graph.openaire.eu/docs/apis/search-api/research-products/
+    Endpoint : https://api.openaire.eu/search/publications
+
+    Robuste : si OpenAIRE down ou format change, log warning et retourne [].
+    """
+    from datetime import timedelta
+    max_results = _tuned_max_results(query, "openaire", max_results)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=RECENT_DAYS_LIMIT)).strftime("%Y-%m-%d")
+    today  = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    params = {
+        "keywords":         query,
+        "fromDateAccepted": cutoff,
+        "toDateAccepted":   today,
+        "format":           "json",
+        "page":             1,
+        "size":             max_results,
+        "sortBy":           "resultdateofacceptance,descending",
+    }
+
+    _respect_domain_cooldown("https://api.openaire.eu/")
+    session = _get_session()
+    try:
+        response = session.get(
+            "https://api.openaire.eu/search/publications",
+            params=_shuffle_params(params),
+            headers=_api_headers(),
+            timeout=20,
+        )
+        if response.status_code in (403, 429):
+            _record_block("https://api.openaire.eu/", base_seconds=60.0)
+            logger.warning(f"🚫 OpenAIRE : statut HTTP {response.status_code}")
+            return []
+        response.raise_for_status()
+        data = response.json()
+    except (RequestsError, OSError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning(f"❌ OpenAIRE : erreur pour « {query[:60]}... » : {exc}")
+        return []
+
+    articles: list[dict[str, Any]] = []
+    # Structure : results.result[].metadata."oaf:entity"."oaf:result".{...}
+    # Tolerant aux variantes de structure (OpenAIRE retourne parfois en list)
+    results = data.get("response", {}).get("results", {}).get("result", [])
+    if isinstance(results, dict):
+        results = [results]
+    if not isinstance(results, list):
+        return []
+
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("metadata", {})
+        entity = (metadata.get("oaf:entity", {}) or {})
+        result = (entity.get("oaf:result", {}) or {})
+
+        # Titre : peut etre dict ou liste de dicts
+        title_field = result.get("title", "")
+        title = ""
+        if isinstance(title_field, dict):
+            title = str(title_field.get("$", "") or title_field.get("content", ""))
+        elif isinstance(title_field, list) and title_field:
+            first = title_field[0]
+            if isinstance(first, dict):
+                title = str(first.get("$", "") or first.get("content", ""))
+            else:
+                title = str(first)
+        elif isinstance(title_field, str):
+            title = title_field
+        title = title.strip()
+        if not title:
+            continue
+
+        # URL : children.instance[].webresource.url ou DOI
+        link = ""
+        pid_field = result.get("pid", [])
+        if isinstance(pid_field, dict):
+            pid_field = [pid_field]
+        if isinstance(pid_field, list):
+            for pid in pid_field:
+                if isinstance(pid, dict):
+                    classid = (pid.get("@classid") or "").lower()
+                    val = pid.get("$") or pid.get("content") or ""
+                    if classid == "doi" and val:
+                        link = f"https://doi.org/{val}"
+                        break
+        if not link:
+            # Fallback : children.instance[].webresource.url
+            children = result.get("children", {})
+            instances = children.get("instance", [])
+            if isinstance(instances, dict):
+                instances = [instances]
+            for inst in instances or []:
+                if isinstance(inst, dict):
+                    wr = inst.get("webresource", {})
+                    if isinstance(wr, list) and wr:
+                        wr = wr[0]
+                    if isinstance(wr, dict):
+                        url_field = wr.get("url", "")
+                        if isinstance(url_field, dict):
+                            link = str(url_field.get("$", "") or url_field.get("content", ""))
+                        elif isinstance(url_field, str):
+                            link = url_field
+                        if link:
+                            break
+        if not link:
+            continue
+
+        # Abstract
+        desc_field = result.get("description", "")
+        summary = ""
+        if isinstance(desc_field, dict):
+            summary = str(desc_field.get("$", "") or desc_field.get("content", ""))
+        elif isinstance(desc_field, list) and desc_field:
+            first = desc_field[0]
+            if isinstance(first, dict):
+                summary = str(first.get("$", "") or first.get("content", ""))
+            else:
+                summary = str(first)
+        elif isinstance(desc_field, str):
+            summary = desc_field
+        summary = summary.strip()[:600]
+
+        articles.append({
+            "title":        title,
+            "link":         link,
+            "summary":      summary,
+            "source":       "OpenAIRE",
+            "category":     "science",
+            "collected_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+    logger.info(f"   └─ OpenAIRE : {len(articles)} résultat(s) pour « {query[:60]}... »")
+    _record_query_stat(query, "openaire", len(articles))
+    return articles
+
+
 def fetch_google_news(query: str) -> list[dict[str, Any]] | None:
     # Rotation de locale (hl/gl/ceid) pour varier le profil vu par Google
     hl, gl, ceid = random.choice(_GNEWS_LOCALES)
@@ -2339,6 +2505,8 @@ def _run_scientific_sources_parallel(
         sources_config.append(("EuropePMC", "🇪🇺", fetch_europepmc, build_europepmc_queries, 5.0, 10.0, 3.0))
     if enabled.get("base"):
         sources_config.append(("BASE", "🌍", fetch_base, build_base_queries, 6.0, 12.0, 4.0))
+    if enabled.get("openaire"):
+        sources_config.append(("OpenAIRE", "🇪🇺", fetch_openaire, build_openaire_queries, 5.0, 10.0, 3.0))
 
     if not sources_config:
         return [], []
@@ -2380,6 +2548,7 @@ def run_scraper(
     include_semantic_scholar:  bool = True,    # ON : gratuit (rate-limit 1 r/s sans clé), ~200M papers
     include_europepmc:         bool = True,    # ON : gratuit, sans clé, ~40M papers (PubMed+preprints UE)
     include_base:              bool = True,    # ON : gratuit, 400M docs internationaux (peut bloquer certaines IP)
+    include_openaire:          bool = True,    # ON : gratuit, sans inscription, ~240M publications financees UE
     include_web:               bool = False,   # OFF : nécessite TAVILY_API_KEY
     include_patents:           bool = True,    # ON : gratuit, sans clé, brevets industriels PVD/CVD/ALD
     apply_filter:              bool = True,
@@ -2457,7 +2626,7 @@ def run_scraper(
     # Sinon, mode sequentiel historique (utile si l'utilisateur veut un trace
     # ordonne ou troubleshooter une source en particulier).
     # =========================================================================
-    if SCRAPE_PARALLEL_SCIENTIFIC and (include_openalex or include_crossref or include_hal or include_semantic_scholar or include_europepmc or include_base):
+    if SCRAPE_PARALLEL_SCIENTIFIC and (include_openalex or include_crossref or include_hal or include_semantic_scholar or include_europepmc or include_base or include_openaire):
         _maybe_inter_source_pause("Sources_Parallel")
         parallel_articles, parallel_blocks = _run_scientific_sources_parallel({
             "openalex":  include_openalex,
@@ -2466,6 +2635,7 @@ def run_scraper(
             "s2":        include_semantic_scholar,
             "europepmc": include_europepmc,
             "base":      include_base,
+            "openaire":  include_openaire,
         })
         all_articles.extend(parallel_articles)
         _executed_blocks.extend(parallel_blocks)

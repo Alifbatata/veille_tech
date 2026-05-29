@@ -46,6 +46,7 @@ data/feedback_history.json
 data/emerging_topics.json
 data/prompt_versions.json
 data/user_profiles.json
+data/epo_cache.json
 
 # =============================================================================
 # Exports PDF (regenerables depuis les .md - pas a commiter)

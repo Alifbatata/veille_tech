@@ -86,6 +86,29 @@ PROXY_COUNTRY=CH
 
 > 🌐 **Proxy résidentiel — fortement recommandé**. C'est ce qui te garantit de **ne jamais te faire bloquer** par les sources (Google News, arXiv, Patents). Provider conseillé : Decodo (~$7 prépayé = 6+ mois pour notre volume). Sans ça, le programme tourne quand même mais avec un risque de ban temporaire occasionnel. Voir le fichier `.env.example` pour les détails.
 
+> 🆕 **EPO OPS (European Patent Office) — gratuit avec inscription, optionnel**
+>
+> Enrichit les top brevets avec **citations forward** (combien de brevets posterieurs citent celui-ci) et **family size** (extensions internationales). Signal très fort pour identifier les brevets cruciaux.
+>
+> **Étapes d'inscription** (10 min, gratuit, sans CB) :
+> 1. Aller sur **https://developers.epo.org**
+> 2. Cliquer **« Sign up »** en haut à droite
+> 3. Remplir le formulaire (email + mot de passe + nom)
+> 4. Confirmer ton email (vérifier ton inbox)
+> 5. Se connecter, cliquer **« My apps »** dans le menu utilisateur
+> 6. Cliquer **« Create a new app »** → donner un nom (ex: « Veille PVD »)
+> 7. Sélectionner les APIs disponibles (toutes gratuites)
+> 8. Récupérer **« Consumer Key »** et **« Consumer Secret »**
+> 9. Ajouter dans ton fichier `.env` :
+>    ```
+>    EPO_CONSUMER_KEY=ta_consumer_key
+>    EPO_CONSUMER_SECRET=ton_consumer_secret
+>    ```
+> 10. Relancer `python main.py` — l'enrichissement s'active automatiquement (cap 20 brevets/run pour protéger le quota).
+>
+> **Quotas gratuits** : 4 Go / semaine, ~4 millions de requêtes / semaine. Largement suffisant pour notre veille.
+> **Cache local** : `data/epo_cache.json` évite les re-calls inutiles (TTL 60 jours).
+
 ---
 
 ## 3. Comment lancer le programme

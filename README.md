@@ -2,9 +2,9 @@
 
 Système de veille stratégique industrielle pour le suivi de concurrents, d'innovations en revêtements de surface (PVD / CVD / ALD / sputtering / DLC) **et de découvertes transférables** depuis d'autres domaines (photonique, MEMS, biomim, nanotech, IA process, métamatériaux).
 
-Le pipeline collecte des articles depuis **11 sources** scientifiques et de presse, les filtre via une cascade de modèles Gemini (~38 niveaux de fallback dynamiques) selon une **logique d'innovation transférable cross-domaine**, découvre automatiquement les nouveaux acteurs (entreprises et labos), et envoie un digest HTML hebdomadaire scoré 1-5 par email.
+Le pipeline collecte des articles depuis **12 sources** scientifiques et de presse, les filtre via une cascade de modèles Gemini (~38 niveaux de fallback dynamiques) selon une **logique d'innovation transférable cross-domaine**, découvre automatiquement les nouveaux acteurs (entreprises et labos), et envoie un digest HTML hebdomadaire scoré 1-5 par email.
 
-## Sources de collecte (11 sources)
+## Sources de collecte (12 sources)
 
 | Source | Volume typique | Authentification |
 |---|---|---|
@@ -16,6 +16,7 @@ Le pipeline collecte des articles depuis **11 sources** scientifiques et de pres
 | Semantic Scholar (~111 requêtes) | ~30 articles | clé optionnelle |
 | **🆕 EuropePMC** (~110 requêtes, PubMed + preprints) | ~100 articles | aucune |
 | **🆕 BASE Bielefeld** (~110 requêtes, 400M docs international) | ~80 articles | aucune |
+| **🆕 OpenAIRE** (~110 requêtes, 240M publications financées UE) | ~80 articles | aucune |
 | Tavily Web Search (~110 requêtes) | ~40 articles | clé optionnelle (1000 req/mois) |
 | **Google Patents** (~112 requêtes, métadonnées enrichies CPC/IPC/inventeurs) | ~100 brevets | aucune |
 | Google News RSS (~589 requêtes furtives, mode weekend) | ~1500+ articles | aucune |
