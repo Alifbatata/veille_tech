@@ -2293,6 +2293,138 @@ def fetch_openaire(query: str, max_results: int = 20) -> list[dict[str, Any]]:
     return articles
 
 
+# =============================================================================
+# J-STAGE — Japan Science and Technology Agency (5.9M papers, abstracts EN)
+# =============================================================================
+
+def build_jstage_queries() -> list[str]:
+    """Construit les requetes J-STAGE en anglais.
+
+    J-STAGE indexe 5.9M articles scientifiques japonais. Depuis 2005, les
+    abstracts sont systematiquement en anglais. Le Japon est un acteur
+    majeur en PVD/CVD/ALD : Tokyo Electron, ULVAC, Canon, Nikon, AIST,
+    NIMS publient enormement. Source critique souvent manquante par les
+    bases occidentales.
+    """
+    if not KEYWORDS and not SOLO_KEYWORDS:
+        return []
+    base = [
+        "physical vapor deposition",
+        "chemical vapor deposition",
+        "atomic layer deposition",
+        "magnetron sputtering",
+        "thin film coating",
+    ]
+    kw_q    = list(KEYWORDS or [])
+    solo_q  = list(SOLO_KEYWORDS or [])
+    cross_q = list(CROSS_DOMAIN_TOPICS or [])
+    # Less queries than other sources : J-STAGE est plus lent (rate-limit poli)
+    return list(dict.fromkeys(base + kw_q + solo_q + cross_q))
+
+
+def fetch_jstage(query: str, max_results: int = 20) -> list[dict[str, Any]]:
+    """Interroge l'API J-STAGE Search (gratuite, sans cle).
+
+    Documentation : https://www.jstage.jst.go.jp/static/pages/JstageServices/TAB3/-char/en
+    Endpoint : https://api.jstage.jst.go.jp/searchapi/do?service=3&...
+    Format reponse : XML/Atom standard.
+
+    Filtre par annee (pubyearfrom/to) cote serveur. Parse via feedparser
+    (deja utilise pour les RSS).
+    """
+    from datetime import timedelta
+    max_results = _tuned_max_results(query, "jstage", max_results)
+
+    cutoff_year = (datetime.now(timezone.utc) - timedelta(days=RECENT_DAYS_LIMIT)).year
+    current_year = datetime.now(timezone.utc).year
+
+    params = {
+        "service":     3,           # 3 = article search
+        "text":        query,
+        "count":       max_results,
+        "start":       1,
+        "pubyearfrom": cutoff_year,
+        "pubyearto":   current_year,
+    }
+
+    _respect_domain_cooldown("https://api.jstage.jst.go.jp/")
+    session = _get_session()
+    try:
+        response = session.get(
+            "https://api.jstage.jst.go.jp/searchapi/do",
+            params=_shuffle_params(params),
+            headers=_api_headers(accept_json=False),  # API retourne du XML
+            timeout=20,
+        )
+        if response.status_code in (403, 429):
+            _record_block("https://api.jstage.jst.go.jp/", base_seconds=120.0)
+            logger.warning(f"🚫 J-STAGE : statut HTTP {response.status_code}")
+            return []
+        response.raise_for_status()
+    except (RequestsError, OSError) as exc:
+        logger.warning(f"❌ J-STAGE : erreur pour « {query[:60]}... » : {exc}")
+        return []
+
+    # Parse Atom XML via feedparser
+    feed = feedparser.parse(response.content)
+    if not feed.entries:
+        logger.info(f"   └─ J-STAGE : 0 résultat pour « {query[:60]}... »")
+        _record_query_stat(query, "jstage", 0)
+        return []
+
+    articles: list[dict[str, Any]] = []
+    for entry in feed.entries:
+        title = (entry.get("title") or "").strip()
+        if not title:
+            continue
+        # Lien : J-STAGE expose dans <link>
+        link = (entry.get("link") or "").strip()
+        if not link:
+            # Fallback : DOI dans dc:identifier
+            link = (entry.get("id") or "").strip()
+        if not link:
+            continue
+        # Abstract : dc:description ou summary
+        summary = (entry.get("summary") or entry.get("description") or "").strip()[:600]
+        # Filtrer les abstracts non-anglais : on detecte les caracteres CJK
+        # et on rejette si plus de 30% sont CJK (= papers fully in japanese
+        # qu'on ne pourra pas exploiter sans traduction).
+        if summary and _is_mostly_cjk(summary):
+            continue
+
+        # Source : journal name si disponible
+        venue = entry.get("source", {}).get("title", "") if hasattr(entry, "source") else ""
+        if not venue and hasattr(entry, "dc_publisher"):
+            venue = entry.dc_publisher
+        venue = (venue or "J-STAGE").strip()[:80]
+
+        articles.append({
+            "title":        title,
+            "link":         link,
+            "summary":      summary,
+            "source":       f"J-STAGE — {venue}",
+            "category":     "science",
+            "collected_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+    logger.info(f"   └─ J-STAGE : {len(articles)} résultat(s) pour « {query[:60]}... »")
+    _record_query_stat(query, "jstage", len(articles))
+    return articles
+
+
+def _is_mostly_cjk(text: str, threshold: float = 0.30) -> bool:
+    """Detecte si un texte est majoritairement chinois/japonais/coreen.
+
+    Si plus de `threshold` des caracteres sont CJK, on considere le texte
+    comme non-anglophone et on l'ecarte (les LLMs gerent les paragraphes
+    mixtes EN/JP mais ratent les paragraphes purement JP/ZH).
+    """
+    if not text:
+        return False
+    cjk_count = sum(1 for c in text if "　" <= c <= "鿿" or "＀" <= c <= "￯")
+    return cjk_count / max(1, len(text)) > threshold
+
+
 def fetch_google_news(query: str) -> list[dict[str, Any]] | None:
     # Rotation de locale (hl/gl/ceid) pour varier le profil vu par Google
     hl, gl, ceid = random.choice(_GNEWS_LOCALES)
@@ -2507,6 +2639,8 @@ def _run_scientific_sources_parallel(
         sources_config.append(("BASE", "🌍", fetch_base, build_base_queries, 6.0, 12.0, 4.0))
     if enabled.get("openaire"):
         sources_config.append(("OpenAIRE", "🇪🇺", fetch_openaire, build_openaire_queries, 5.0, 10.0, 3.0))
+    if enabled.get("jstage"):
+        sources_config.append(("J-STAGE", "🇯🇵", fetch_jstage, build_jstage_queries, 6.0, 12.0, 4.0))
 
     if not sources_config:
         return [], []
@@ -2549,6 +2683,7 @@ def run_scraper(
     include_europepmc:         bool = True,    # ON : gratuit, sans clé, ~40M papers (PubMed+preprints UE)
     include_base:              bool = True,    # ON : gratuit, 400M docs internationaux (peut bloquer certaines IP)
     include_openaire:          bool = True,    # ON : gratuit, sans inscription, ~240M publications financees UE
+    include_jstage:            bool = True,    # ON : gratuit, sans cle, ~5.9M papers japonais avec abstracts en anglais
     include_web:               bool = False,   # OFF : nécessite TAVILY_API_KEY
     include_patents:           bool = True,    # ON : gratuit, sans clé, brevets industriels PVD/CVD/ALD
     apply_filter:              bool = True,
@@ -2626,7 +2761,7 @@ def run_scraper(
     # Sinon, mode sequentiel historique (utile si l'utilisateur veut un trace
     # ordonne ou troubleshooter une source en particulier).
     # =========================================================================
-    if SCRAPE_PARALLEL_SCIENTIFIC and (include_openalex or include_crossref or include_hal or include_semantic_scholar or include_europepmc or include_base or include_openaire):
+    if SCRAPE_PARALLEL_SCIENTIFIC and (include_openalex or include_crossref or include_hal or include_semantic_scholar or include_europepmc or include_base or include_openaire or include_jstage):
         _maybe_inter_source_pause("Sources_Parallel")
         parallel_articles, parallel_blocks = _run_scientific_sources_parallel({
             "openalex":  include_openalex,
@@ -2636,6 +2771,7 @@ def run_scraper(
             "europepmc": include_europepmc,
             "base":      include_base,
             "openaire":  include_openaire,
+            "jstage":    include_jstage,
         })
         all_articles.extend(parallel_articles)
         _executed_blocks.extend(parallel_blocks)
